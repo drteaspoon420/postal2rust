@@ -95,22 +95,137 @@ fn hidden(c: &mut Command) -> &mut Command {
     c
 }
 
-fn ps(script: &str) -> Option<String> {
-    let out = hidden(Command::new("powershell").args(["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script])).output().ok()?;
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
+#[cfg(windows)]
+mod win {
+    //! Native dialogs (user32 MessageBoxW, shell32 SHBrowseForFolderW), forced to the foreground:
+    //! PowerShell/WinForms dialogs could open behind other windows and look like a hang.
+    use std::ffi::c_void;
+    type Hwnd = *mut c_void;
 
-fn q(s: &str) -> String {
-    s.replace('\'', "''")
+    #[repr(C)]
+    struct BrowseInfoW {
+        owner: Hwnd,
+        root: *const c_void,
+        display_name: *mut u16,
+        title: *const u16,
+        flags: u32,
+        callback: Option<unsafe extern "system" fn(Hwnd, u32, isize, isize) -> i32>,
+        lparam: isize,
+        image: i32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(h: Hwnd, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        fn SendMessageW(h: Hwnd, msg: u32, w: usize, l: isize) -> isize;
+        fn SetForegroundWindow(h: Hwnd) -> i32;
+        fn SetWindowPos(h: Hwnd, after: Hwnd, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+        fn AllowSetForegroundWindow(pid: u32) -> i32;
+    }
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SHBrowseForFolderW(bi: *mut BrowseInfoW) -> *mut c_void;
+        fn SHGetPathFromIDListW(pidl: *const c_void, path: *mut u16) -> i32;
+    }
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn OleInitialize(r: *mut c_void) -> i32;
+        fn CoTaskMemFree(p: *mut c_void);
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// OK / OK+Cancel message box on top of everything; true when OK was pressed.
+    pub fn message(title: &str, text: &str, ok_cancel: bool) -> bool {
+        const MB_OKCANCEL: u32 = 0x1;
+        const MB_ICONINFORMATION: u32 = 0x40;
+        const MB_SETFOREGROUND: u32 = 0x1_0000;
+        const MB_TOPMOST: u32 = 0x4_0000;
+        let (t, c) = (wide(text), wide(title));
+        let kind = MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST | if ok_cancel { MB_OKCANCEL } else { 0 };
+        unsafe {
+            AllowSetForegroundWindow(u32::MAX);
+            MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), kind) == 1
+        }
+    }
+
+    unsafe extern "system" fn browse_cb(h: Hwnd, msg: u32, _l: isize, data: isize) -> i32 {
+        const BFFM_INITIALIZED: u32 = 1;
+        const BFFM_SETSELECTIONW: u32 = 0x400 + 103;
+        const HWND_TOPMOST: isize = -1;
+        if msg == BFFM_INITIALIZED {
+            unsafe {
+                SetWindowPos(h, HWND_TOPMOST as Hwnd, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040);
+                SetForegroundWindow(h);
+                if data != 0 {
+                    SendMessageW(h, BFFM_SETSELECTIONW, 1, data);
+                }
+            }
+        }
+        0
+    }
+
+    /// Folder browser starting at `start`; the chosen folder, or None when cancelled.
+    pub fn pick_folder(prompt: &str, start: &str) -> Option<String> {
+        const BIF_RETURNONLYFSDIRS: u32 = 0x1;
+        const BIF_EDITBOX: u32 = 0x10;
+        const BIF_NEWDIALOGSTYLE: u32 = 0x40;
+        let title = wide(prompt);
+        let start_w = wide(start);
+        let mut name = vec![0u16; 260];
+        let mut bi = BrowseInfoW {
+            owner: std::ptr::null_mut(),
+            root: std::ptr::null(),
+            display_name: name.as_mut_ptr(),
+            title: title.as_ptr(),
+            flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
+            callback: Some(browse_cb),
+            lparam: if start.is_empty() { 0 } else { start_w.as_ptr() as isize },
+            image: 0,
+        };
+        unsafe {
+            OleInitialize(std::ptr::null_mut());
+            AllowSetForegroundWindow(u32::MAX);
+            let pidl = SHBrowseForFolderW(&mut bi);
+            if pidl.is_null() {
+                return None;
+            }
+            let mut path = vec![0u16; 1024];
+            let ok = SHGetPathFromIDListW(pidl, path.as_mut_ptr()) != 0;
+            CoTaskMemFree(pidl);
+            if !ok {
+                return None;
+            }
+            let n = path.iter().position(|&c| c == 0).unwrap_or(path.len());
+            Some(String::from_utf16_lossy(&path[..n]))
+        }
+    }
 }
 
 fn message(text: &str, ok_cancel: bool) -> bool {
-    let buttons = if ok_cancel { "OKCancel" } else { "OK" };
-    let r = ps(&format!(
-        "Add-Type -AssemblyName System.Windows.Forms; $f=New-Object System.Windows.Forms.Form -Property @{{TopMost=$true}}; [System.Windows.Forms.MessageBox]::Show($f, '{}', '{TITLE}', '{buttons}')",
-        q(text)
-    ));
-    r.as_deref() == Some("OK")
+    #[cfg(windows)]
+    {
+        win::message(TITLE, text, ok_cancel)
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("{text}");
+        !ok_cancel
+    }
+}
+
+fn pick_folder(at: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        win::pick_folder("Select your POSTAL 2 install folder (it contains System, Maps and Textures).", at)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = at;
+        None
+    }
 }
 
 /// Folder picker until a valid install is chosen (saved) or the player cancels.
@@ -124,10 +239,7 @@ fn ask(start: Option<PathBuf>) -> Option<PathBuf> {
     }
     let mut at = start.map(|p| p.display().to_string()).unwrap_or_default();
     loop {
-        let picked = ps(&format!(
-            "Add-Type -AssemblyName System.Windows.Forms; $f=New-Object System.Windows.Forms.Form -Property @{{TopMost=$true}}; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Select your POSTAL 2 install folder (contains System, Maps, Textures)'; $d.ShowNewFolderButton=$false; $d.SelectedPath='{}'; if($d.ShowDialog($f) -eq 'OK'){{ $d.SelectedPath }}",
-            q(&at)
-        ))?;
+        let Some(picked) = pick_folder(&at) else { return None };
         if picked.is_empty() {
             return None;
         }
