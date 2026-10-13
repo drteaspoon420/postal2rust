@@ -30,7 +30,10 @@ pub mod viewport;
 
 use std::path::PathBuf;
 
-/// Game root from `--game`, `POSTAL2_DIR`, or the default Steam location.
+/// Game root: `--game`, `POSTAL2_DIR`, a `postal2dir.txt` next to the exe (one line, the install
+/// folder), the exe's own folder or its parent (dropped into / beside the install), then every
+/// Steam library (registry SteamPath + libraryfolders.vdf) and the usual Steam/GOG folders.
+/// The first folder holding `System\Postal2.ini` wins; else the old default (dev machine).
 pub fn game_root(arg: Option<&str>) -> PathBuf {
     if let Some(a) = arg {
         return PathBuf::from(a);
@@ -38,5 +41,65 @@ pub fn game_root(arg: Option<&str>) -> PathBuf {
     if let Ok(d) = std::env::var("POSTAL2_DIR") {
         return PathBuf::from(d);
     }
-    PathBuf::from(r"G:\SteamLibrary\steamapps\common\POSTAL2Complete")
+    find_install().unwrap_or_else(|| PathBuf::from(r"G:\SteamLibrary\steamapps\common\POSTAL2Complete"))
+}
+
+/// A POSTAL 2 install folder: one with `System\Postal2.ini` (or `System\Default.ini`).
+pub fn is_install(p: &std::path::Path) -> bool {
+    let s = p.join("System");
+    s.join("Postal2.ini").is_file() || s.join("Default.ini").is_file() && s.join("Engine.u").is_file()
+}
+
+pub fn find_install() -> Option<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()));
+    if let Some(dir) = &exe_dir {
+        if let Ok(s) = std::fs::read_to_string(dir.join("postal2dir.txt")) {
+            if let Some(line) = s.lines().map(str::trim).find(|l| !l.is_empty()) {
+                cands.push(PathBuf::from(line.trim_matches('"')));
+            }
+        }
+        cands.push(dir.clone());
+        if let Some(p) = dir.parent() {
+            cands.push(p.to_path_buf());
+            cands.push(p.join("POSTAL2Complete"));
+        }
+    }
+    // Steam libraries.
+    let mut steam_roots: Vec<PathBuf> = Vec::new();
+    if let Ok(out) = std::process::Command::new("reg").args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"]).output() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(v) = text.lines().find(|l| l.contains("SteamPath")).and_then(|l| l.split("REG_SZ").nth(1)) {
+            steam_roots.push(PathBuf::from(v.trim().replace('/', "\\")));
+        }
+    }
+    for p in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
+        steam_roots.push(PathBuf::from(p));
+    }
+    let mut libs: Vec<PathBuf> = Vec::new();
+    for root in &steam_roots {
+        libs.push(root.clone());
+        if let Ok(vdf) = std::fs::read_to_string(root.join("steamapps").join("libraryfolders.vdf")) {
+            for line in vdf.lines() {
+                let l = line.trim();
+                if let Some(rest) = l.strip_prefix("\"path\"") {
+                    let v = rest.trim().trim_matches('"').replace("\\\\", "\\");
+                    libs.push(PathBuf::from(v));
+                }
+            }
+        }
+    }
+    for drive in 'C'..='Z' {
+        libs.push(PathBuf::from(format!(r"{drive}:\SteamLibrary")));
+    }
+    for lib in libs {
+        let common = lib.join("steamapps").join("common");
+        for name in ["POSTAL2Complete", "POSTAL 2", "Postal 2", "POSTAL2"] {
+            cands.push(common.join(name));
+        }
+    }
+    for p in [r"C:\GOG Games\POSTAL 2", r"C:\Program Files (x86)\GOG Galaxy\Games\POSTAL 2", r"C:\Program Files (x86)\Running With Scissors\POSTAL 2"] {
+        cands.push(PathBuf::from(p));
+    }
+    cands.into_iter().find(|c| is_install(c))
 }

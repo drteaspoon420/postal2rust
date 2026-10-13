@@ -89,6 +89,19 @@ fn main() {
         verbose: has(&a, "-v") || has(&a, "--verbose"),
     };
     let system = args.root.join("System");
+    if !system.join("Postal2.ini").is_file() && !system.join("Default.ini").is_file() {
+        let msg = format!(
+            "POSTAL 2 was not found.\n\nThis engine needs your own installed copy of POSTAL 2 (e.g. Steam \"POSTAL 2\" / POSTAL2Complete).\n\nLooked in: {}\n\nFix: put the install folder path on one line in postal2dir.txt next to p2game.exe, or run\n  p2game.exe --game \"C:\\path\\to\\POSTAL2Complete\"",
+            args.root.display()
+        );
+        eprintln!("{msg}");
+        #[cfg(windows)]
+        {
+            let script = format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show(@'\n{msg}\n'@, 'Postal 2 Rust/Bevy') | Out-Null");
+            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]).status();
+        }
+        std::process::exit(2);
+    }
     p2game::host::register_level_hook(p2game::physics::level_hook);
     // Sound (silent engine unless the window attaches a device) and movies/Matinee for every level.
     if std::env::var_os("P2GAME_NO_AUDIO").is_none() {
