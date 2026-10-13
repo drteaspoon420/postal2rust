@@ -1,4 +1,4 @@
-# postal2rust
+# Postal 2 Rust/Bevy
 
 A clean-room Rust / [Bevy](https://bevyengine.org) engine that runs **POSTAL 2** (Monday to Friday plus Apocalypse Weekend) from **your own installed copy** of the game, the same way OpenMW does for Morrowind and OpenRA does for C&C.
 
