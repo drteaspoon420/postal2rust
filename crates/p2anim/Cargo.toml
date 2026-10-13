@@ -1,0 +1,12 @@
+[package]
+name = "p2anim"
+description = "Bevy viewer for POSTAL 2 skeletal meshes and animations, loading data from the user's own install"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+uscript = { path = "../uscript" }
+glam = "0.32"
+bevy = "0.19"

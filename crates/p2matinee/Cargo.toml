@@ -1,0 +1,10 @@
+[package]
+name = "p2matinee"
+description = "UE2 Matinee (SceneManager) cutscene decoding and playback runtime for POSTAL 2 maps"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+glam = "0.32"

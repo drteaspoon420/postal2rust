@@ -1,0 +1,17 @@
+[package]
+name = "p2physics"
+description = "UE2 actor physics for POSTAL 2: movement natives, physics modes, movers, volumes, touch/bump/encroach events and trace natives over p2collide"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["vm"]
+# VmBridge: sync with uscript VM actors and deliver events to script.
+vm = ["dep:uscript"]
+
+[dependencies]
+upkg.workspace = true
+p2collide = { path = "../p2collide" }
+glam = "0.32"
+uscript = { path = "../uscript", optional = true }

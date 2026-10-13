@@ -1,0 +1,11 @@
+[package]
+name = "p2audio"
+description = "List, export and play POSTAL 2 sounds (.uax packages, embedded map sounds, Music .ogg)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+# Same rodio Bevy's audio backend already pulls in; only device output and Vorbis (for Music\*.ogg).
+rodio = { version = "0.22", default-features = false, features = ["playback", "lewton"] }

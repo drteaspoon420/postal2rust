@@ -1,0 +1,12 @@
+[package]
+name = "upkg"
+description = "Reader for Unreal Engine 2 packages (.u/.utx/.usx/.ukx/.uax/maps) as shipped with POSTAL 2"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+png = "0.18"

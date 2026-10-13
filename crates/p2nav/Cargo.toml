@@ -1,0 +1,10 @@
+[package]
+name = "p2nav"
+description = "POSTAL 2 navigation network: NavigationPoints and ReachSpecs decoded from maps, plus the bridge to the uscript AI navigation natives"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+uscript = { path = "../uscript" }

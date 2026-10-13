@@ -1,0 +1,16 @@
+[package]
+name = "p2collide"
+description = "Collision for POSTAL 2 maps: BSP tree traces, swept boxes against BSP polygons, static meshes and terrain, plus a UE2-style walking pawn"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["script-defaults"]
+# Read actor collision flags and player sizes from the original class defaults via uscript.
+script-defaults = ["dep:uscript"]
+
+[dependencies]
+upkg.workspace = true
+glam = "0.32"
+uscript = { path = "../uscript", optional = true }

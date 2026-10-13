@@ -1,0 +1,16 @@
+[package]
+name = "p2fx"
+description = "Unreal Engine 2 particle systems (Emitter/ParticleEmitter) for Bevy, loading POSTAL 2 effects from the user's own install"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+uscript = { path = "../uscript" }
+bevy = "0.19"
+p2collide = { path = "../p2collide" }
+
+[[bin]]
+name = "p2fx"
+path = "src/main.rs"

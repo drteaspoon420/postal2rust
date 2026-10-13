@@ -1,0 +1,11 @@
+ghidra_proj/
+logs/
+target/
+*.png
+out/
+target-*/ 
+play/ 
+out_*.txt 
+out_*.patch 
+out_*.diff 
+out_*.png 

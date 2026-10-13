@@ -1,0 +1,13 @@
+[package]
+name = "uscript"
+description = "UnrealScript object graph, bytecode decoder and interpreter for POSTAL 2 (UE2 v118) script packages"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mimalloc = { version = "0.1", default-features = false }

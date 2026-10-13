@@ -1,0 +1,14 @@
+[package]
+name = "p2input"
+description = "UE2 input layer: EInputKey/EInputAction codes, User.ini [Engine.Input] bindings and aliases, axis/button state and the console-command exec path"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", optional = true }
+
+[features]
+default = []
+# Bevy keyboard/mouse/gamepad -> EInputKey mapping.
+bevy = ["dep:bevy"]

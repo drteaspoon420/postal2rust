@@ -1,0 +1,20 @@
+[package]
+name = "p2canvas"
+description = "UE2 Canvas (HUD/menu 2D drawing) semantics on Bevy, drawing POSTAL 2 fonts and materials from the user's own install"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+uscript = { path = "../uscript" }
+p2input = { path = "../p2input", features = ["bevy"] }
+bevy = "0.19"
+
+[[bin]]
+name = "p2canvas"
+path = "src/bin/p2canvas.rs"
+
+[[bin]]
+name = "p2menu"
+path = "src/bin/p2menu.rs"

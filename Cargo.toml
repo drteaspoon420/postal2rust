@@ -1,0 +1,30 @@
+[workspace]
+resolver = "3"
+members = ["crates/upkg", "crates/p2view", "crates/p2audio", "crates/p2anim", "crates/uscript", "crates/p2nav", "crates/p2game", "crates/p2canvas", "crates/p2collide", "crates/p2physics", "crates/p2fx", "crates/p2input", "crates/p2sound", "crates/p2movie", "crates/p2matinee", "crates/p2save"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+version = "0.1.0"
+
+[workspace.dependencies]
+upkg = { path = "crates/upkg" }
+thiserror = "2"
+
+# Fast iteration: optimize dependencies (Bevy) even in debug builds, keep our own code quick to compile.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+# Fast to relink during development; dependencies are still fully optimized.
+incremental = true
+
+# Shipping build: whole-program optimization. `cargo build --profile dist`
+[profile.dist]
+inherits = "release"
+incremental = false
+lto = "fat"
+codegen-units = 1

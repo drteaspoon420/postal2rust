@@ -1,0 +1,9 @@
+[package]
+name = "p2save"
+description = "POSTAL 2 save games: slot listing (SavedGameInfo.ini) and .usa save package inspection"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true

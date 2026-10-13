@@ -1,0 +1,20 @@
+[package]
+name = "p2sound"
+description = "UE2-style audio for POSTAL 2 content: mixer with actor slots, priorities and voice limit, 3D attenuation/pan, ambient sounds and music"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["device", "bevy"]
+# Real-time output through the default audio device (rodio/cpal).
+device = ["rodio/playback"]
+# Bevy plugin (listener/emitter components).
+bevy = ["dep:bevy", "device"]
+
+[dependencies]
+upkg.workspace = true
+glam = "0.32"
+# Vorbis decoding for Music\*.ogg (and device output when "device" is on).
+rodio = { version = "0.22", default-features = false, features = ["lewton"] }
+bevy = { version = "0.19", optional = true }

@@ -1,0 +1,20 @@
+[package]
+name = "p2movie"
+description = "Clean-room id RoQ movie decoder and UE2 Movie natives for POSTAL 2 cutscene movies"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+default = ["bevy"]
+bevy = ["dep:bevy", "dep:p2sound"]
+
+[dependencies]
+upkg.workspace = true
+png = "0.18"
+bevy = { version = "0.19", optional = true }
+p2sound = { path = "../p2sound", optional = true }
+
+[[bin]]
+name = "p2movie"
+required-features = ["bevy"]

@@ -1,0 +1,15 @@
+[package]
+name = "p2view"
+description = "Bevy map viewer for POSTAL 2 content, loading data from the user's own install"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+upkg.workspace = true
+p2anim = { path = "../p2anim" }
+p2collide = { path = "../p2collide" }
+p2sound = { path = "../p2sound" }
+p2fx = { path = "../p2fx" }
+bevy = "0.19"
+rayon = "1"
