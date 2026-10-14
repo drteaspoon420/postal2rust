@@ -424,14 +424,23 @@ fn open_url(url: &str) {
     if std::env::var_os("P2GAME_NO_BROWSER").is_some() {
         return;
     }
+    // The system's default URL handler (the user's default browser).
     #[cfg(windows)]
-    let r = std::process::Command::new("explorer").arg(url).spawn();
+    let r = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn();
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg(url).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
     let r = std::process::Command::new("xdg-open").arg(url).spawn();
     if let Err(e) = r {
         eprintln!("open {url}: {e}");
+    } else if let Ok(mut c) = r {
+        // The handler exits once it has passed the URL to the default browser (off the game
+        // thread, so a slow handler never stalls a frame).
+        let url = url.to_string();
+        std::thread::spawn(move || match c.wait() {
+            Ok(s) => println!("open url: handed to the default browser ({s})"),
+            Err(e) => eprintln!("open {url}: {e}"),
+        });
     }
 }
 
