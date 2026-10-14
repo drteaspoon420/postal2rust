@@ -115,8 +115,10 @@ pub(crate) fn initial_window(vm: &mut Vm, title: String) -> Window {
     let fs = user_value(vm, SECTION, "StartupFullscreen").map(|s| truthy(&s));
     let bl = user_value(vm, SECTION, "FullscreenWindowed").map(|s| truthy(&s));
     let auto = automated();
+    // `P2GAME_WINDOWED=1` (the launcher's --windowed) wins over the saved mode for this run.
+    let force_windowed = std::env::var_os("P2GAME_WINDOWED").is_some();
     v.mode = match (fs, bl) {
-        _ if auto => Mode::Windowed,
+        _ if auto || force_windowed => Mode::Windowed,
         (_, Some(true)) => Mode::Borderless,
         (Some(true), _) => Mode::Fullscreen,
         (Some(false), _) | (_, Some(false)) => Mode::Windowed,
@@ -140,11 +142,13 @@ pub(crate) fn initial_window(vm: &mut Vm, title: String) -> Window {
     v.gamma = ini_float(vm, "Gamma").unwrap_or(1.0).clamp(0.3, 3.0);
     println!("video: {}x{} {:?} vsync {} fps limit {} brightness {} contrast {} gamma {}", v.width, v.height, v.mode, v.vsync, v.fps_limit, v.brightness, v.contrast, v.gamma);
     let mut w = Window { title, resolution: (v.width, v.height).into(), present_mode: present(v.vsync), ..default() };
+    // No window exists yet, so `MonitorSelection::Current` has nothing to resolve against and
+    // winit panics ("Unable to get monitor"): open on the primary monitor.
     w.mode = match v.mode {
         Mode::Windowed => WindowMode::Windowed,
-        Mode::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
+        Mode::Borderless => WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
         // The exact video mode is picked in `apply` once the monitors are known.
-        Mode::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current),
+        Mode::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current),
     };
     v.dirty = v.mode == Mode::Fullscreen;
     with_video(|s| *s = v);

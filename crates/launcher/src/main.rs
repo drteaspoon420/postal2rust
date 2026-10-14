@@ -274,7 +274,9 @@ fn main() {
     };
     let mut cmd = Command::new(&game);
     cmd.current_dir(exe_dir()).arg("--game").arg(&root).args(pass);
-    if !windowed {
+    if windowed {
+        cmd.env("P2GAME_WINDOWED", "1");
+    } else {
         cmd.env("P2GAME_FULLSCREEN", "1");
     }
     // Game output goes to a log beside the exe (the launcher has no console).
