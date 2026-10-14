@@ -277,17 +277,19 @@ fn call(vm: &mut Vm, o: ObjId, f: &str, args: Vec<Value>) {
     }
 }
 
-/// Controls of the original menus that cannot affect our renderer.
+/// Controls of the original menus that cannot affect our renderer (or, on the main menu, store
+/// links to DLC this port does not run).
 fn dead_controls(class: &str) -> &'static [&'static str] {
     match class {
         "MenuVideo" => &["OpenGLCheckbox", "DisplayNumberSlider"],
         "MenuPerformanceAdvanced" => &["TextureDetailWorldSlider", "TextureDetailSkinSlider", "TextureDetailLightmapSlider", "AnisotropyCombo", "DetailTextureCheckbox"],
+        "MenuMain" | "AWMainMenu" => &["LaunchPLChoice", "ActualDLCChoice"],
         _ => &[],
     }
 }
 
 /// After `CreateMenuContents`: hide the dead controls and close the gaps they leave.
-fn menu_created(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
+fn menu_created(vm: &mut Vm, me: Option<ObjId>, _a: &mut [Value], after: bool) {
     let (Some(me), true) = (me, after) else { return };
     let class = vm.classes[vm.objects[me].class].name.clone();
     let dead: Vec<ObjId> = dead_controls(&class).iter().filter_map(|n| prop_obj(vm, me, n)).collect();
@@ -304,6 +306,11 @@ fn menu_created(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
     }
     for &d in &dead {
         call(vm, d, "HideWindow", vec![]);
+        for n in dead_controls(&class) {
+            if prop_obj(vm, me, n) == Some(d) {
+                vm.set_prop(me, n, Value::Object(None));
+            }
+        }
     }
     let Some(Value::Array(items)) = vm.get_prop(me, "MenuItems").cloned() else { return };
     let field = |s: &Value, n: &str| match s {
@@ -336,7 +343,7 @@ fn menu_created(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
 
 /// MenuVideo greys out the gamma sliders in windowed mode (UE2 used the desktop gamma ramp);
 /// our grade pass works in every mode.
-fn gamma_sliders(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
+fn gamma_sliders(vm: &mut Vm, me: Option<ObjId>, _a: &mut [Value], after: bool) {
     let (Some(me), true) = (me, after) else { return };
     for (s, help) in [("BrightnessSlider", "BrightnessHelp"), ("ContrastSlider", "ContrastHelp"), ("GammaSlider", "GammaHelp")] {
         if let Some(o) = prop_obj(vm, me, s) {
@@ -348,11 +355,45 @@ fn gamma_sliders(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
     }
 }
 
+/// MenuMain.AddSocialIcons: the website / Facebook / Twitter buttons and the POSTAL 4 or
+/// Paradise Lost store banner are closed again as soon as they are made.
+fn social_icons(vm: &mut Vm, me: Option<ObjId>, _a: &mut [Value], after: bool) {
+    let (Some(me), true) = (me, after) else { return };
+    call(vm, me, "RemoveSocialIcons", vec![]);
+    for n in ["WebsiteIcon", "FacebookIcon", "TwitterIcon", "Postal4Icon", "ParadiseLostIcon"] {
+        vm.set_prop(me, n, Value::Object(None));
+    }
+}
+
+/// Main-menu version line shown by this port instead of the install's "Postal2: Steam-int-5100".
+pub(crate) const VERSION_TEXT: &str = "Postal2: Rust/Bevy v1";
+
+/// FontInfo.DrawTextEx(Canvas, CanvasWidth, X, Y, Str, ...): the root window draws
+/// `InstalledDescription - EngineVersion HotfixText` at the bottom left of the main menu.
+fn draw_text_ex(_vm: &mut Vm, _me: Option<ObjId>, a: &mut [Value], after: bool) {
+    if after {
+        return;
+    }
+    if let Some(s @ Value::Str(_)) = a.get_mut(4) {
+        if is_version_line(&s.as_str()) {
+            *s = Value::Str(VERSION_TEXT.into());
+        }
+    }
+}
+
+fn is_version_line(s: &str) -> bool {
+    // InstalledTitle ": " InstalledType "-" InstalledCountry "-" EngineVersion [HotfixText]
+    let Some((title, rest)) = s.split_once(": ") else { return false };
+    title.eq_ignore_ascii_case("postal2") && rest.split('-').count() >= 3 && rest.split('-').nth(2).is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 fn level_hook(host: &p2game::host::GameHost, vm: &mut Vm) {
     // First in the list: these answers win over the fixed viewport replies of older hosts.
     host.ext.borrow_mut().insert(0, Rc::new(SettingsExt));
     vm.watch_calls("CreateMenuContents", menu_created);
     vm.watch_calls("SetGammaSlidersEnabled", gamma_sliders);
+    vm.watch_calls("AddSocialIcons", social_icons);
+    vm.watch_calls("DrawTextEx", draw_text_ex);
 }
 
 pub(crate) fn install(sim: &mut crate::window::Sim) {
@@ -488,6 +529,14 @@ fn frame_limit(mut next: Local<Option<std::time::Instant>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_line_match() {
+        assert!(is_version_line("Postal2: Steam-int-5100"));
+        assert!(is_version_line("Postal2: Steam-int-5100(Oct 1 2020)"));
+        assert!(!is_version_line("Copyright 2003-2015 RWS  All Rights Reserved"));
+        assert!(!is_version_line("Postal2: hello"));
+    }
 
     #[test]
     fn setres_forms() {

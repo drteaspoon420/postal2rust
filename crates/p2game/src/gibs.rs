@@ -35,7 +35,7 @@ fn vec_arg(a: &[Value], k: usize) -> Option<Vec3> {
     }
 }
 
-fn take_damage(vm: &mut Vm, me: Option<ObjId>, a: &[Value], after: bool) {
+fn take_damage(vm: &mut Vm, me: Option<ObjId>, a: &mut [Value], after: bool) {
     // TakeDamage(Damage, InstigatedBy, HitLocation, Momentum, DamageType), recorded on entry
     // (script rescales Momentum by Mass inside).
     let (Some(me), false) = (me, after) else { return };
@@ -65,7 +65,7 @@ pub fn torque_axis(centre: Vec3, hit: Vec3, mom: Vec3, body: Option<Vec3>) -> Op
     (t.length() > 1e-3).then(|| t.normalize())
 }
 
-fn give_momentum(vm: &mut Vm, me: Option<ObjId>, _a: &[Value], after: bool) {
+fn give_momentum(vm: &mut Vm, me: Option<ObjId>, _a: &mut [Value], after: bool) {
     let (Some(me), true) = (me, after) else { return };
     if !vm.get_prop(me, "bFixedRotationDir").is_some_and(|v| v.as_bool()) {
         return;

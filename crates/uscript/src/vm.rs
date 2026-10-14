@@ -358,7 +358,8 @@ impl FuncInfo {
 pub type NativeFn = fn(&mut Vm, &mut Vec<Value>) -> Result<Value>;
 /// Observer of a script function call: (vm, self, arguments, after). Called on entry with the
 /// arguments as passed (`after` false) and on return with the final parameter values (`after` true).
-pub type CallWatch = fn(&mut Vm, Option<ObjId>, &[Value], bool);
+/// On entry the watch may rewrite the arguments; the function then runs with the new values.
+pub type CallWatch = fn(&mut Vm, Option<ObjId>, &mut [Value], bool);
 
 /// What happens when script calls a native function that neither the VM nor the host implements.
 /// Either way the call is counted in [`Vm::missing_natives`].
@@ -1502,8 +1503,11 @@ impl Vm {
             locals[li] = std::mem::replace(&mut args[k], Value::Void);
         }
         if let Some(w) = fi.watch {
-            let a: Vec<Value> = fi.params.iter().map(|&li| locals[li].clone()).collect();
-            w(self, this, &a, false);
+            let mut a: Vec<Value> = fi.params.iter().map(|&li| locals[li].clone()).collect();
+            w(self, this, &mut a, false);
+            for (k, &li) in fi.params.iter().enumerate() {
+                locals[li] = std::mem::replace(&mut a[k], Value::Void);
+            }
         }
         let class = class.or_else(|| this.map(|o| self.objects[o].class));
         self.frames.push(Frame { pkg: f.pkg as usize, this, class, locals, fi: Some(fi.clone()), iters: Vec::new() });
@@ -1522,9 +1526,9 @@ impl Vm {
                 eprintln!("CALL {}.{}({}) -> {} on {who}", fi.owner, fi.name, shown.join(", "), self.value_string(&ret));
             }
         }
-        let params: Vec<Value> = fi.params.iter().map(|&li| frame.locals[li].clone()).collect();
+        let mut params: Vec<Value> = fi.params.iter().map(|&li| frame.locals[li].clone()).collect();
         if let Some(w) = fi.watch {
-            w(self, this, &params, true);
+            w(self, this, &mut params, true);
         }
         Ok((ret, params))
     }
