@@ -188,22 +188,13 @@ pub fn run(cfg: BootConfig, args: Args) {
     let mut app = App::new();
     let t_plugins = std::time::Instant::now();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        // `P2GAME_RES=WxH`: window size (perf A/B: fill-rate vs CPU-bound rendering).
-        primary_window: Some(Window {
-            title: format!("p2game - {map}"),
-            resolution: std::env::var("P2GAME_RES").ok().and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))).unwrap_or((1600, 900)).into(),
-            // `P2GAME_FULLSCREEN=1`: borderless fullscreen on the current monitor (playtests).
-            mode: if std::env::var_os("P2GAME_FULLSCREEN").is_some() {
-                bevy::window::WindowMode::BorderlessFullscreen(bevy::window::MonitorSelection::Current)
-            } else {
-                bevy::window::WindowMode::Windowed
-            },
-            // `P2GAME_NOVSYNC=1`: uncapped frame rate (tests small-dt physics like high-refresh monitors).
-            present_mode: if std::env::var_os("P2GAME_NOVSYNC").is_some() { bevy::window::PresentMode::AutoNoVsync } else { bevy::window::PresentMode::default() },
-            ..default()
-        }),
+        // Size, window mode and vsync from the saved video settings (settings.rs; env overrides
+        // P2GAME_RES=WxH, P2GAME_FULLSCREEN=1, P2GAME_NOVSYNC=1, P2GAME_FPS_LIMIT=N).
+        primary_window: Some(crate::settings::initial_window(&mut sim.game.world.vm, "Postal 2 Rust/Bevy".to_string())),
         ..default()
     }));
+    crate::settings::install(&mut sim);
+    app.add_plugins(crate::settings::SettingsPlugin);
     println!("load: bevy plugins added in {:.2} s ({:.2} s since boot)", t_plugins.elapsed().as_secs_f32(), boot_secs());
     // HUD, menus, console and player input from script (ui.rs).
     crate::ui::install(&mut app, &mut sim, &args.root);
@@ -216,6 +207,7 @@ pub fn run(cfg: BootConfig, args: Args) {
     app.add_plugins(crate::ui::UiPlugin)
         .add_plugins(crate::debug::DebugOverlayPlugin)
         .add_plugins(crate::devmenu::DevMenuPlugin)
+        .add_plugins(crate::cursor::CursorPlugin)
         .add_plugins(crate::cinema_view::CinemaViewPlugin)
         .add_plugins(crate::weapons::WeaponsPlugin)
         .add_plugins(crate::realinput::RealInputPlugin)
@@ -236,6 +228,7 @@ pub fn run(cfg: BootConfig, args: Args) {
             (load_scene, tag_level_entities, tick_script, travel, crate::ui::ui_frame, spawn_rigs, sync_transforms, dyn_meshes, pose_rigs, crate::ui::hide_own_body, frame_npc, fly_camera, crate::ui::follow_player, crate::cinema_view::apply_cinema_view, crate::zone_fog::zone_fog, crate::debug::update_overlay, report, capture).chain(),
         )
         .run();
+    crate::cursor::release_cursor();
     // Close the audio stream while the process is still whole (see `audio::shutdown_device`).
     p2game::audio::shutdown_device();
 }
@@ -333,7 +326,7 @@ fn travel(
         sim.rigs.clear();
         sim.reload = true;
         if let Ok(mut w) = windows.single_mut() {
-            w.title = format!("p2game - {}", sim.game.host.map_name.borrow());
+            w.title = "Postal 2 Rust/Bevy".to_string();
         }
     }
     // The level load blocks for a second or more, so first put a loading screen up and let it
@@ -398,7 +391,7 @@ fn travel(
     }
     println!("load: travel hooks done {:.2} s", t_travel.elapsed().as_secs_f32());
     if let Ok(mut w) = windows.single_mut() {
-        w.title = format!("p2game - {}", sim.game.level.map.name);
+        w.title = "Postal 2 Rust/Bevy".to_string();
     }
 }
 

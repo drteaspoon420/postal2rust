@@ -226,14 +226,24 @@ impl Cinema {
                 let total = self.scenes.borrow().get(&sm).map(|p| p.total_scene_time()).unwrap_or(0.0);
                 vm.set_prop(sm, "TotalSceneTime", Value::Float(total));
                 vm.fire_event(sm, "SceneStarted", vec![]);
+                if std::env::var_os("P2GAME_CINEMA_TRACE").is_some() {
+                    let o = |n: &str| vm.get_prop(sm, n).and_then(|v| v.as_obj()).map(|x| vm.object_name(x));
+                    println!("CINEMA {} SceneStarted viewer {:?} oldpawn {:?} preceding {:?} affect {:?}", vm.object_name(sm), o("Viewer"), o("OldPawn"), o("PrecedingScenesPawn"), vm.get_prop(sm, "Affect"));
+                }
             }
             SceneEvent::Ended => {
                 self.stats.borrow_mut().scenes_ended += 1;
                 vm.set_prop(sm, "bIsRunning", Value::Bool(false));
                 vm.fire_event(sm, "SceneEnded", vec![]);
+                if std::env::var_os("P2GAME_CINEMA_TRACE").is_some() {
+                    println!("CINEMA {} SceneEnded", vm.object_name(sm));
+                }
             }
             SceneEvent::Trigger(ev) | SceneEvent::TriggerNext(ev) => {
                 self.stats.borrow_mut().scene_triggers += 1;
+                if std::env::var_os("P2GAME_CINEMA_TRACE").is_some() {
+                    println!("CINEMA {} TriggerEvent {ev}", vm.object_name(sm));
+                }
                 let viewer = vm.get_prop(sm, "Viewer").cloned().unwrap_or(Value::Object(None));
                 let inst = match viewer.as_obj().and_then(|v| vm.get_prop(v, "Pawn").and_then(|p| p.as_obj())) {
                     Some(p) => Value::Object(Some(p)),

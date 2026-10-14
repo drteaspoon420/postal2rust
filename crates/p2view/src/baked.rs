@@ -78,6 +78,7 @@ pub struct BakedBatch {
     pub lightmap: u32,
     pub uv_anim: Option<crate::uvanim::UvAnim>,
     pub tex_anim: Option<crate::uvanim::TexAnim>,
+    pub zone: u8,
 }
 
 /// Queues spawning of lightmapped BSP batches (needs the baked material asset type).
@@ -92,6 +93,9 @@ pub fn spawn_baked_world(commands: &mut Commands, batches: Vec<BakedBatch>, ligh
             }
             if let Some(a) = b.tex_anim {
                 e.insert(a);
+            }
+            if b.zone != 0 {
+                e.insert(crate::zones::ZoneTag(b.zone));
             }
         }
     });

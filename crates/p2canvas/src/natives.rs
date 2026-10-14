@@ -276,15 +276,18 @@ pub fn world_to_screen(cam: &Camera, size: (f32, f32), loc: [f32; 3]) -> [f32; 3
     [half_w + fy * fov_scale / fx, size.1 * 0.5 - fz * fov_scale / fx, fx]
 }
 
-/// UE2 `ScreenToWorld`: unit direction through a screen pixel.
+/// UE2 `ScreenToWorld`: the offset from the camera to the screen pixel deprojected onto the near
+/// clipping plane (5 uu along the view axis). The engine computes `SafeNormal()` of it but drops
+/// the result, so the vector is NOT unit length; MapScreen/NewsScreen rely on that (they double it
+/// and place the map arrow / newspaper there, "extremely close to the near clipping plane").
 pub fn screen_to_world(cam: &Camera, size: (f32, f32), s: [f32; 3]) -> [f32; 3] {
+    const NEAR_CLIPPING_PLANE: f32 = 5.0;
     let [x, y, z] = axes(cam.rotation);
     let half_w = size.0 * 0.5;
     let fov_scale = half_w / (cam.fov.to_radians() * 0.5).tan();
     let (sy, sz) = ((s[0] - half_w) / fov_scale, (size.1 * 0.5 - s[1]) / fov_scale);
     let d = [x[0] + y[0] * sy + z[0] * sz, x[1] + y[1] * sy + z[1] * sz, x[2] + y[2] * sy + z[2] * sz];
-    let l = dot(d, d).sqrt().max(1e-6);
-    [d[0] / l, d[1] / l, d[2] / l]
+    [d[0] * NEAR_CLIPPING_PLANE, d[1] * NEAR_CLIPPING_PLANE, d[2] * NEAR_CLIPPING_PLANE]
 }
 
 fn camera_args(a: &[Value], first: usize, cam: Camera) -> Camera {
@@ -759,9 +762,9 @@ mod tests {
         let p = [30.0, 100.0, 20.0];
         let s = world_to_screen(&cam, (800.0, 600.0), p);
         let d = screen_to_world(&cam, (800.0, 600.0), s);
-        let l = dot(p, p).sqrt();
+        // On the near plane (5 uu ahead), along the ray to p (p is 100 uu ahead).
         for k in 0..3 {
-            assert!((d[k] - p[k] / l).abs() < 1e-4);
+            assert!((d[k] - p[k] * 0.05).abs() < 1e-4);
         }
     }
 }

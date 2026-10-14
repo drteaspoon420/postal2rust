@@ -4155,6 +4155,7 @@ dependencies = [
  "p2view",
  "upkg",
  "uscript",
+ "winit",
 ]
 
 [[package]]

@@ -74,7 +74,7 @@ pub struct MatData {
     pub frame_rate: f32,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct MeshData {
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
@@ -90,6 +90,8 @@ pub struct MeshData {
     pub source: Vec<u32>,
     /// BSP: lightmap atlas index (into `SceneData::lightmaps`) for this batch, if lightmapped.
     pub lightmap: Option<u32>,
+    /// BSP: zone of this batch's surfaces (0 = unzoned or on a zone boundary, always drawn).
+    pub zone: u8,
 }
 
 /// A decoded BSP lightmap atlas (RGBA8, linear light where 128 = 1.0 like UE2's modulate-2x).
@@ -192,6 +194,8 @@ pub struct Instance {
     /// Ambient (0-255 scale, colour * brightness) of the zone the actor was saved in, if it
     /// sets one: UE2 adds that zone's ambient to the baked vertex light at render time.
     pub zone_ambient: Option<[f32; 3]>,
+    /// BSP zone number of the actor's location (0 = unzoned, always drawn).
+    pub zone: u8,
 }
 
 /// A Mover actor (doors, lifts, lockers). In the shipped maps every mover is a static mesh,
@@ -253,6 +257,10 @@ pub struct SceneData {
     pub spawn: (Vec3, Vec3),
     pub spawn_found: bool,
     pub stats: Stats,
+    /// Zone pairs joined by a portal surface (UE2 zone connectivity), and the BSP for camera
+    /// zone lookups. Static actors in zones the camera's zone cannot reach are not drawn.
+    pub portals: Vec<(u8, u8)>,
+    pub bsp: Option<Arc<p2collide::bsp::Bsp>>,
 }
 
 pub struct Options {
@@ -271,6 +279,9 @@ pub struct Builder<'l> {
     tex_objs: Vec<(Obj, Option<Obj>, bool)>,
     pub materials: Vec<MatData>,
     mesh_ids: HashMap<(String, usize), Vec<(u32, u32)>>,
+    /// Mesh id -> copy with reversed triangle winding, for actors with a mirroring
+    /// (negative determinant) DrawScale3D. Back-face culling would otherwise drop them.
+    mirrored_ids: HashMap<u32, u32>,
     pub meshes: Vec<MeshData>,
     stats: Stats,
 }
@@ -335,7 +346,10 @@ impl<'l> Builder<'l> {
                         data.blend = Blend::Masked;
                     }
                     if props.bool("bAlphaTexture") == Some(true) && data.blend == Blend::Opaque {
-                        data.blend = Blend::Translucent;
+                        // UE2 keeps Z writes on for plain alpha textures. Near-opaque ones (intro
+                        // WTP_interstate_sign: 97% of texels alpha 255) drawn as no-depth Blend let
+                        // hidden back layers (the sign's slat strips) paint over the front panel.
+                        data.blend = if mostly_opaque(&tex) { Blend::Masked } else { Blend::Translucent };
                     }
                     if props.bool("bTwoSided") == Some(true) {
                         data.two_sided = true;
@@ -452,6 +466,30 @@ impl<'l> Builder<'l> {
         self.mesh_ids.insert(obj.key(), out.clone());
         out
     }
+
+    /// Copy of mesh `id` with every triangle's winding reversed (cached).
+    pub(crate) fn mirrored_mesh(&mut self, id: u32) -> u32 {
+        if let Some(&m) = self.mirrored_ids.get(&id) {
+            return m;
+        }
+        let mut md = self.meshes[id as usize].clone();
+        for t in md.indices.chunks_exact_mut(3) {
+            t.swap(1, 2);
+        }
+        let m = self.meshes.len() as u32;
+        self.meshes.push(md);
+        self.mirrored_ids.insert(id, m);
+        m
+    }
+}
+
+/// True when an alpha texture is effectively opaque (under 5% of texels below alpha 128, from a
+/// small mip), so it can be drawn alpha-tested with depth writes instead of sorted blending.
+fn mostly_opaque(tex: &Obj) -> bool {
+    let Ok(t) = read_texture(&tex.pkg, tex.export) else { return false };
+    let Ok((_, _, px)) = t.decode_rgba(t.mips.len().saturating_sub(1).min(3)) else { return false };
+    let n = px.len() / 4;
+    n > 0 && px.chunks_exact(4).filter(|c| c[3] < 128).count() * 20 < n
 }
 
 fn rotator_matrix(r: [i32; 3]) -> Mat3 {
@@ -486,14 +524,15 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
         tex_objs: Vec::new(),
         materials: Vec::new(),
         mesh_ids: HashMap::new(),
+        mirrored_ids: HashMap::new(),
         meshes: Vec::new(),
         stats: Stats::default(),
     };
     b.default_material();
 
     // --- World BSP, batched per (material, lightmap atlas). Sky zone polygons go to the sky. ---
-    let mut world: HashMap<(u32, i32), MeshData> = HashMap::new();
-    let mut sky_world: HashMap<(u32, i32), MeshData> = HashMap::new();
+    let mut world: HashMap<(u32, i32, u8), MeshData> = HashMap::new();
+    let mut sky_world: HashMap<(u32, i32, u8), MeshData> = HashMap::new();
     let model = find_world_model(map).map(|mi| read_model(map, mi)).transpose()?;
     let sky_zone = model.as_ref().and_then(|m| m.zones.iter().position(|z| map.class_of(*z).eq_ignore_ascii_case("SkyZoneInfo")));
     let sky_ref = sky_zone.and_then(|i| model.as_ref().map(|m| m.zones[i]));
@@ -525,7 +564,16 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
             let section = (n.light_map >= 0).then(|| model.sections.get(n.section as usize)).flatten();
             let lm_tex = section.map(|sec| sec.light_map_texture).filter(|&t| t >= 0 && (t as usize) < model.light_map_textures.len()).unwrap_or(-1);
             let target = if in_sky { &mut sky_world } else { &mut world };
-            let md = target.entry((mat, lm_tex)).or_insert_with(|| MeshData { material: mat, lightmap: (lm_tex >= 0).then_some(lm_tex as u32), ..Default::default() });
+            // The zone a surface belongs to: both sides in the same zone (or one side solid,
+            // zone 0 on the back of a wall), else a boundary surface that stays always drawn.
+            let zone = match (n.zone[0], n.zone[1]) {
+                (a, b) if a == b => a,
+                (0, b) => b,
+                (a, 0) => a,
+                _ => 0,
+            };
+            let zone = if in_sky { 0 } else { zone };
+            let md = target.entry((mat, lm_tex, zone)).or_insert_with(|| MeshData { material: mat, lightmap: (lm_tex >= 0).then_some(lm_tex as u32), zone, ..Default::default() });
             let start = md.positions.len() as u32;
             let poly: Vec<[f32; 3]> = model.node_polygon(n).collect();
             for (k, p) in poly.iter().enumerate() {
@@ -572,7 +620,7 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
     let mut spawn_found = false;
     let mut light_cache: HashMap<usize, Option<upkg::lighting::MapLight>> = HashMap::new();
     // World BSP for the leaf light lists of unbaked meshes.
-    let bsp = model.as_ref().map(p2collide::bsp::Bsp::new);
+    let bsp = model.as_ref().map(|m| Arc::new(p2collide::bsp::Bsp::new(m)));
     // Zone ambient per zone actor, for static meshes' baked lighting (LevelInfo included).
     let zone_amb: HashMap<ObjRef, [f32; 3]> = upkg::lighting::read_zones(map)
         .iter()
@@ -620,6 +668,9 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
             _ => Vec3::ONE,
         };
         let lin = rotator_matrix(rot) * Mat3::from_diagonal(ds3 * ds);
+        // Mirrored actors (intro.fuk StaticMeshActor698 tunnel, DrawScale3D 1,-1,1) flip the
+        // triangle winding: UE2 swaps the cull face for them, so use a reversed-index copy.
+        let mirrored = lin.determinant() < 0.0;
         let lin_b = SWAP * lin * SWAP;
         let transform = Mat4::from_cols(
             lin_b.x_axis.extend(0.0),
@@ -657,7 +708,7 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
             // (bSpecialLit: only bSpecialLit lights). Bevy's dynamic lights ignored the glow and
             // special-lit flag (slaughterhouse freezer door 73 vs orig 134, MilitaryBase3 door 58 vs 28).
             None if props.bool("bUnlit") != Some(true) && std::env::var_os("P2VIEW_ACTOR_DYNAMIC").is_none() => {
-actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == Some(true), model.as_ref(), bsp.as_ref(), &mut light_cache, map).map(Arc::new)
+actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == Some(true), model.as_ref(), bsp.as_deref(), &mut light_cache, map).map(Arc::new)
             }
             _ => None,
         };
@@ -667,7 +718,30 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
         // 255 means pulsing in UE2; treat it as no glow.
         let glow = props.byte("AmbientGlow").filter(|&g| g < 255).unwrap_or(0) as f32;
         let zone_ambient = actor_zone(map, &props).and_then(|zr| zone_amb.get(&zr).copied());
+        // Zone from the BSP at the actor's origin; origins inside solid space (zone 0) fall back
+        // to the zone the editor saved in the actor's Region.
+        let zone = bsp.as_ref().map(|b| b.point_zone(Vec3::from(loc)).min(255) as u8).unwrap_or(0);
+        let zone = if zone != 0 {
+            zone
+        } else {
+            actor_zone(map, &props).and_then(|zr| model.as_ref().and_then(|m| m.zones.iter().position(|z| *z == zr))).map(|i| i.min(255) as u8).filter(|&z| z != 0).unwrap_or_else(|| {
+                // Wall-embedded pieces (window/door frames, roofs): the first zone found at
+                // growing offsets around the origin.
+                let Some(bsp) = bsp.as_ref() else { return 0 };
+                let o = Vec3::from(loc);
+                for r in [32.0f32, 96.0, 256.0] {
+                    for d in [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z] {
+                        let z = bsp.point_zone(o + d * r);
+                        if z != 0 {
+                            return z.min(255) as u8;
+                        }
+                    }
+                }
+                0
+            })
+        };
         for (s, (mesh, default_mat)) in sections.iter().enumerate() {
+            let mesh = &if mirrored { b.mirrored_mesh(*mesh) } else { *mesh };
             let material = match skins.get(s).copied().filter(|r| *r != ObjRef::Null) {
                 Some(r) => {
                     let o = lib.resolve(map, r);
@@ -675,7 +749,7 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
                 }
                 None => *default_mat,
             };
-            let inst = Instance { mesh: *mesh, material, transform, cull_distance: cull, export: i, light: light.clone(), glow, unlit: props.bool("bUnlit") == Some(true), zone_ambient };
+            let inst = Instance { mesh: *mesh, material, transform, cull_distance: cull, export: i, light: light.clone(), glow, unlit: props.bool("bUnlit") == Some(true), zone_ambient, zone };
             if in_sky {
                 sky_instances.push(inst);
             } else {
@@ -727,7 +801,20 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
                 if std::env::var_os("P2VIEW_TERRAIN_TIMING").is_some() {
                     eprintln!("terrain static light: {:?} in {:.1} ms", lit.as_ref().map(|l| l.len()), t0.elapsed().as_secs_f32() * 1000.0);
                 }
-                let layers = build_terrain(&mut b, map, &t, lit.as_deref(), terrain_clip.as_ref());
+                let mut layers = build_terrain(&mut b, map, &t, lit.as_deref(), terrain_clip.as_ref());
+                // The TerrainInfo's zone number (its Region zone actor's index in the model), for
+                // zone culling: intro.fuk's two terrains sit in zones 27 and 2.
+                let tz = begin_object(map, ti)
+                    .ok()
+                    .and_then(|(_, p)| actor_zone(map, &p))
+                    .and_then(|zr| model.as_ref().and_then(|m| m.zones.iter().position(|z| *z == zr)))
+                    .map(|i| i.min(255) as u8);
+                if std::env::var_os("P2VIEW_ZONE_TRACE").is_some() {
+                    eprintln!("terrain {} zone {tz:?}", map.name(map.exports[ti].name));
+                }
+                for l in &mut layers {
+                    l.mesh.zone = tz.unwrap_or(0);
+                }
                 b.stats.terrains += 1;
                 b.stats.terrain_tris += layers.iter().map(|l| l.mesh.indices.len() / 3).sum::<usize>();
                 terrain.extend(layers);
@@ -784,7 +871,7 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
             let mat = b.materials.len() as u32;
             b.materials.push(md);
             world.insert(
-                (u32::MAX - b.stats.projectors as u32, -1),
+                (u32::MAX - b.stats.projectors as u32, -1, 0),
                 MeshData {
                     positions: d.positions.iter().map(|&p| to_bevy(p).to_array()).collect(),
                     normals: d.normals.iter().map(|&n| dir_to_bevy(n).normalize_or_zero().to_array()).collect(),
@@ -865,6 +952,18 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
         SkyData { origin, world: w, instances: sky_instances }
     });
     b.stats.load_ms = t0.elapsed().as_millis();
+    let mut portals: Vec<(u8, u8)> = model
+        .as_ref()
+        .map(|m| {
+            m.nodes
+                .iter()
+                .filter(|n| n.num_verts >= 3 && n.zone[0] != n.zone[1] && m.surfs.get(n.surf as usize).is_some_and(|s| s.flags & pf::PORTAL != 0))
+                .map(|n| (n.zone[0].min(n.zone[1]), n.zone[0].max(n.zone[1])))
+                .collect()
+        })
+        .unwrap_or_default();
+    portals.sort_unstable();
+    portals.dedup();
     Ok(SceneData {
         textures,
         materials: b.materials,
@@ -882,6 +981,8 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
         spawn,
         spawn_found,
         stats: b.stats,
+        portals,
+        bsp,
     })
 }
 

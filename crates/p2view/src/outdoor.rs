@@ -34,7 +34,8 @@ impl Plugin for OutdoorPlugin {
             .expect("register terrain shader");
         app.add_plugins(MaterialPlugin::<SplatMaterial>::default()).add_systems(Update, (animate_lights, ue2_display, crate::uvanim::animate_uvs, crate::uvanim::animate_textures))
             .add_systems(PostUpdate, sync_sky_camera.before(bevy::camera::CameraUpdateSystems).before(bevy::transform::TransformSystems::Propagate))
-            .add_systems(PostUpdate, fog_far_plane.after(bevy::camera::CameraUpdateSystems));
+            .add_systems(PostUpdate, fog_far_plane.after(bevy::camera::CameraUpdateSystems))
+            .add_systems(PostUpdate, crate::zones::zone_cull.after(bevy::transform::TransformSystems::Propagate).before(bevy::camera::visibility::VisibilitySystems::CheckVisibility));
     }
 }
 
@@ -275,11 +276,17 @@ pub fn spawn_outdoor(commands: &mut Commands, s: OutdoorSpawn, build_mesh: fn(&M
                 Some(a) if layer.order > 0 => {
                     let img = world.resource_mut::<Assets<Image>>().add(alpha_image(a));
                     let mat = world.resource_mut::<Assets<SplatMaterial>>().add(SplatMaterial { base, extension: TerrainSplat { alpha: img } });
-                    world.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::IDENTITY, NotShadowCaster));
+                    let mut e = world.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::IDENTITY, NotShadowCaster));
+                    if layer.mesh.zone != 0 {
+                        e.insert(crate::zones::ZoneTag(layer.mesh.zone));
+                    }
                 }
                 _ => {
                     let mat = world.resource_mut::<Assets<StandardMaterial>>().add(base);
                     let mut e = world.spawn((Mesh3d(mesh), MeshMaterial3d(mat), Transform::IDENTITY));
+                    if layer.mesh.zone != 0 {
+                        e.insert(crate::zones::ZoneTag(layer.mesh.zone));
+                    }
                     if layer.order > 0 {
                         e.insert(NotShadowCaster);
                     }

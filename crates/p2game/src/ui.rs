@@ -265,6 +265,12 @@ pub(crate) fn hide_own_body(sim: NonSend<Sim>, ui: Res<UiInput>, rigs: Query<&cr
     if third_person(vm, pc) {
         return;
     }
+    // A running Matinee scene owns the camera: the Dude is filmed from outside (intro
+    // TrailerScene2 / DudeHeadsOut walks him out of the trailer) while his controller's
+    // ViewTarget stays the pawn, so his body must stay visible.
+    if p2game::cinema::cinema().is_some_and(|c| c.view.borrow().is_some()) {
+        return;
+    }
     let Some(pawn) = vm.get_prop(pc, "Pawn").and_then(|v| v.as_obj()) else { return };
     let mine = |a: ObjId| {
         let mut cur = Some(a);

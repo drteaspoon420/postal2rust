@@ -73,6 +73,11 @@ impl World {
         let mut vm = Vm::new(&cfg.system_dir).map_err(|e| e.to_string())?;
         // The shipped inis are the VM's base config layer; SaveConfig goes to the VM's user dir.
         vm.set_config_source(Box::new(crate::config::IniConfig::new(&cfg)));
+        // Port default: subtitles off (the shipped DefUser.ini turns them on). Only written when
+        // the player has never saved the option, so turning them on in Options > Audio sticks.
+        if vm.config.user_dir.is_some() {
+            let _ = vm.user_ini_default("User.ini", "Postal2Game.P2Player", "bEnableSubtitles", "False");
+        }
         let files = PackageFiles::new(&cfg.system_dir, &cfg.paths);
         let actor_class = vm.find_class("Engine", "Actor").map_err(|e| e.to_string())?;
         Ok(Self { cfg, vm, files, actor_class, class_cache: HashMap::new(), lib: None })

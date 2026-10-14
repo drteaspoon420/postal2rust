@@ -154,6 +154,8 @@ pub(crate) struct Frontend {
     /// Script-driven player movement (off: fly camera only).
     pub drive_player: bool,
     menu_shown: bool,
+    /// Whether the level's own script shows the main menu (stock Startup map), per level.
+    map_scripts_menu: Option<bool>,
 }
 
 impl Frontend {
@@ -185,7 +187,7 @@ impl Frontend {
         MATERIALS.with(|m| *m.borrow_mut() = Some(db));
         p2game::host::register_level_hook(level_hook);
         level_hook(&game.host, &mut game.world.vm);
-        Frontend { host: None, input, shell, level_key: 0, frames: 0, drive_player, menu_shown: false }
+        Frontend { host: None, input, shell, level_key: 0, frames: 0, drive_player, menu_shown: false, map_scripts_menu: None }
     }
 
     /// Writes `set input` changes to the user User.ini `[Engine.Input]` (UE2 saves on each rebind).
@@ -266,6 +268,7 @@ impl Frontend {
             self.level_key = level_key;
             self.frames = 0;
             self.menu_shown = false;
+            self.map_scripts_menu = None;
         }
         let Some(mh) = self.host.as_mut() else { return out };
         CONSOLE_PC.with(|p| p.set(pc));
@@ -284,6 +287,19 @@ impl Frontend {
         let precaching = mh.base_menu.is_some_and(|r| vm.get_prop(r, "bPrecache").is_some_and(|v| v.as_bool()));
         let precached = mh.base_menu.is_some_and(|r| vm.get_prop(r, "bDidPrecache").is_some_and(|v| v.as_bool()));
         let show_now = self.frames >= 1 && !precaching && (precached || self.frames >= 10);
+        // The stock Startup map shows the menu itself: its logo Matinee chain (StartFirstTime ->
+        // RWSLogo -> Postal2Logo -> loop) ends by triggering a ScriptedTrigger whose
+        // ACTION_ShellMenu calls ShowMenu (Space/Enter, bWantsToSkip, skip each scene; Esc is blocked pre-game).
+        // Showing it from the host on frame 10 drew the menu over the logo intro, so only do it
+        // for startup maps without such a script.
+        if self.map_scripts_menu.is_none() {
+            let scripted = vm.actors.iter().any(|&a| !vm.objects[a].deleted && vm.class_is_a(vm.objects[a].class, "ScriptedTrigger") && match vm.get_prop(a, "Actions") {
+                Some(Value::Array(acts)) => acts.iter().filter_map(|v| v.as_obj()).any(|x| vm.class_is_a(vm.objects[x].class, "ACTION_ShellMenu") && vm.get_prop(x, "Command").is_none_or(|c| c.as_int() == 0)),
+                _ => false,
+            });
+            self.map_scripts_menu = Some(scripted);
+        }
+        let show_now = show_now && self.map_scripts_menu != Some(true);
         if !self.menu_shown && show_now && map == startup && std::env::var_os("P2GAME_NO_AUTOMENU").is_none() {
             if let Some(root) = mh.base_menu {
                 let c = vm.objects[root].class;

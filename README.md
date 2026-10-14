@@ -127,7 +127,7 @@ Windows, Rust stable with the `x86_64-pc-windows-gnullvm` target and [llvm-mingw
 tools\cargo.bat build --release -p p2game -p postal2rust
 ```
 
-This gives `target\release\postal2rust.exe` (launcher) and `p2game.exe` (the game). The game needs `libunwind.dll` from llvm-mingw next to it. You can also run the game directly:
+This gives `target\release\postal2rust.exe` (launcher) and `p2game.exe` (the game). For a shipping build use `--profile dist` instead of `--release` (fat LTO, about 10% faster, slow to build; output in `target\dist`). The game needs `libunwind.dll` from llvm-mingw next to it. You can also run the game directly:
 
 ```
 target\release\p2game.exe --game "C:\path\to\POSTAL2Complete" --map suburbs-1

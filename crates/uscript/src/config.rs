@@ -333,6 +333,17 @@ impl Vm {
         self.flush_config()
     }
 
+    /// Writes `value` for `key` into the user's ini only if the user has never saved that key
+    /// (a port default that differs from the shipped DefUser.ini; the player's own choice wins).
+    pub fn user_ini_default(&mut self, file: &str, section: &str, key: &str, value: &str) -> crate::Result<bool> {
+        if self.user_ini(file).get(section, key).is_some() {
+            return Ok(false);
+        }
+        self.user_ini_set(file, section, key, value)?;
+        self.config.applied.clear();
+        Ok(true)
+    }
+
     /// Writes changed user ini files.
     pub fn flush_config(&mut self) -> crate::Result<()> {
         let Some(dir) = self.config.user_dir.clone() else { return Ok(()) };

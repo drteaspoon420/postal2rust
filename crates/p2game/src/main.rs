@@ -29,6 +29,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(feature = "window")]
 mod cinema_view;
 #[cfg(feature = "window")]
+mod cursor;
+#[cfg(feature = "window")]
 mod debug;
 #[cfg(feature = "window")]
 mod devmenu;
@@ -50,6 +52,8 @@ mod dynmesh;
 mod smoke;
 #[cfg(feature = "window")]
 mod ui;
+#[cfg(feature = "window")]
+mod settings;
 #[cfg(feature = "window")]
 mod splash;
 #[cfg(feature = "window")]

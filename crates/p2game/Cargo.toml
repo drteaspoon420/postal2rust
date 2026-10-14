@@ -24,6 +24,8 @@ p2view = { path = "../p2view", optional = true }
 p2canvas = { path = "../p2canvas", optional = true }
 p2input = { path = "../p2input", features = ["bevy"], optional = true }
 bevy = { version = "0.19", optional = true }
+# Same winit as bevy_winit: window resize requests from the video settings (settings.rs).
+winit = { version = "0.30", default-features = false, optional = true }
 # Particles, fluids, projector decals (rooster's fx_glue.rs).
 p2fx = { path = "../p2fx", optional = true }
 # Global allocator of the p2game binary: the interpreter's many short-lived mixed-size
@@ -33,7 +35,7 @@ mimalloc = { version = "0.1", default-features = false }
 [features]
 default = ["window"]
 # Windowed mode (Bevy + p2view). Build with --no-default-features for a headless-only binary.
-window = ["dep:p2view", "dep:bevy", "dep:p2fx", "p2sound/device", "dep:p2canvas", "dep:p2input"]
+window = ["dep:p2view", "dep:bevy", "dep:p2fx", "p2sound/device", "dep:p2canvas", "dep:p2input", "dep:winit"]
 # Chrome-trace spans for every Bevy system and render phase (writes trace-*.json in the cwd).
 # Build with `--features trace` into a separate target dir; open the file in ui.perfetto.dev.
 trace = ["window", "bevy/trace_chrome"]

@@ -32,6 +32,15 @@ use upkg::skeletal::{read_mesh_animation, read_skeletal_mesh};
 use uscript::host::{AnimChannel, AnimRequest, Host, NativeCall, SoundRequest};
 use uscript::vm::{ObjId, Value, Vm};
 
+/// Set by the `exit` / `quit` console command (menu Quit / Exit to desktop); the window front
+/// end closes the app when it sees it.
+pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether script asked the engine to shut down.
+pub fn quit_requested() -> bool {
+    QUIT_REQUESTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Decoded skeletal mesh data shared by every actor using the mesh.
 pub struct MeshInfo {
     pub obj: Obj,
@@ -954,6 +963,12 @@ impl Host for GameHost {
     fn console_command(&self, vm: &mut Vm, from: Option<ObjId>, command: &str) -> String {
         let c = command.trim();
         let (verb, rest) = c.split_once(char::is_whitespace).unwrap_or((c, ""));
+        // `exit` / `quit` (UWindowRootWindow.DoQuitGame: menu Exit / Quit to desktop): the engine
+        // shuts down; the window front end polls [`quit_requested`] and closes the app.
+        if matches!(verb.to_ascii_lowercase().as_str(), "exit" | "quit") && rest.trim().is_empty() {
+            QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+            return "1".into();
+        }
         if matches!(verb.to_ascii_lowercase().as_str(), "open" | "start" | "travel" | "servertravel") && !rest.trim().is_empty() {
             *self.pending_travel.borrow_mut() = Some(rest.trim().to_string());
         }

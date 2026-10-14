@@ -13,7 +13,8 @@ pub(crate) struct DebugOverlayPlugin;
 
 impl Plugin for DebugOverlayPlugin {
     fn build(&self, app: &mut App) {
-        let visible = !std::env::args().any(|a| a == "--no-debug");
+        // Hidden until F3 (players). `--debug` or `P2GAME_DEBUG=1` show it from the start.
+        let visible = std::env::args().any(|a| a == "--debug") || std::env::var_os("P2GAME_DEBUG").is_some();
         app.insert_resource(DebugOverlay { visible, ..default() }).add_systems(Startup, spawn_overlay);
     }
 }

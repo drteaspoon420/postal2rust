@@ -293,11 +293,14 @@ pub fn spawn_scene_with(
         match m.lightmap.filter(|&lm| baked && usable.get(lm as usize).copied().unwrap_or(false)) {
             Some(lm) => {
                 let base = materials.get(&mat_handles[m.material as usize]).cloned().unwrap_or_default();
-                baked_batches.push(baked::BakedBatch { mesh, base, lightmap: lm, uv_anim: uv_anims[m.material as usize].clone(), tex_anim: tex_anims[m.material as usize].clone() });
+                baked_batches.push(baked::BakedBatch { mesh, base, lightmap: lm, uv_anim: uv_anims[m.material as usize].clone(), tex_anim: tex_anims[m.material as usize].clone(), zone: m.zone });
             }
             None => {
                 // UE2 static geometry only has baked shadowing: no real-time sun shadow on it.
                 let mut e = commands.spawn((Mesh3d(mesh), MeshMaterial3d(mat_handles[m.material as usize].clone()), Transform::IDENTITY, bevy::light::NotShadowReceiver));
+                if m.zone != 0 {
+                    e.insert(crate::zones::ZoneTag(m.zone));
+                }
                 if let Some(a) = &uv_anims[m.material as usize] {
                     e.insert(a.clone());
                 }
@@ -355,6 +358,9 @@ pub fn spawn_scene_with(
             // Mirrors the per-actor CullDistance authored in the map.
             e.insert(VisibilityRange::abrupt(0.0, inst.cull_distance));
         }
+        if inst.zone != 0 {
+            e.insert(crate::zones::ZoneTag(inst.zone));
+        }
         if let Some(a) = &uv_anims[inst.material as usize] {
             e.insert(a.clone());
         }
@@ -364,6 +370,7 @@ pub fn spawn_scene_with(
         actors.entry(inst.export).or_default().push(e.id());
     }
     baked::attach_vertex_lit(commands, vertex_lit);
+    commands.insert_resource(crate::zones::ZoneGraph::new(&data.portals, data.bsp.clone()));
     lap("static meshes");
 
     outdoor::spawn_outdoor(

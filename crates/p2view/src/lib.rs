@@ -8,3 +8,4 @@ pub mod scene;
 pub mod spawn;
 pub mod terrain_clip;
 pub mod uvanim;
+pub mod zones;

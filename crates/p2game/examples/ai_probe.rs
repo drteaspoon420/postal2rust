@@ -86,15 +86,8 @@ fn summon_probe(game: &mut Game) {
 /// cheat), aim the view at its head (MyHead location + 8, as a player aims), fire the real pistol
 /// once, and report the head's location, the shot outcome (PuncturedHeadEffects = head shot) and
 /// the bystander's health. Each victim is destroyed before the next.
-/// `--walk`: instead of summoned (idle) victims, each shot goes at a map bystander that is walking:
-/// the player is put 90 uu behind it on its walk line, aims at its drawn head bone and fires.
-fn headshot_probe(game: &mut Game, n: usize, walk: bool) {
+fn headshot_probe(game: &mut Game, n: usize) {
     let Some(pc) = game.player_controller else { return };
-    // Cheats (Summon) need bAllowCManager, which comes from the user ini (the "Sissy" toggle).
-    if let Some(g) = game.game_info {
-        game.world.vm.set_prop(g, "bAllowCManager", Value::Bool(true));
-        game.world.vm.set_prop(g, "bWarnedCheater", Value::Bool(true));
-    }
     // As the front end does after login: creates the GameState so PlayerPrepSave can finish.
     game.world.vm.fire_event(pc, "TravelPostAccept", vec![]);
     for _ in 0..30 {
@@ -127,66 +120,6 @@ fn headshot_probe(game: &mut Game, n: usize, walk: bool) {
     }
     let mut heads = 0;
     let mut kills = 0;
-    if walk {
-        let mut used = std::collections::HashSet::new();
-        let mut shots = 0;
-        for _ in 0..(n * 60) {
-            if shots >= n {
-                break;
-            }
-            game.tick(1.0 / 30.0);
-            let host = game.host.clone();
-            let vm = &mut game.world.vm;
-            let pp = vm.get_prop(pc, "Pawn").and_then(|v| v.as_obj()).unwrap();
-            // A live, unhurt bystander walking in a straight line (speed 40..250).
-            let walker = vm.actors.iter().copied().find(|&a| {
-                !vm.objects[a].deleted && !used.contains(&a) && vm.class_is_a(vm.objects[a].class, "Bystanders") && vm.get_prop(a, "Health").map(|v| v.as_int()).unwrap_or(0) > 0
-                    && vm.get_prop(a, "MyHead").and_then(|v| v.as_obj()).is_some()
-                    && match vm.get_prop(a, "Velocity") { Some(Value::Vector(v)) => (40.0..250.0).contains(&(v[0] * v[0] + v[1] * v[1]).sqrt()), _ => false }
-            });
-            let Some(b) = walker else { continue };
-            used.insert(b);
-            let v = vm.get_prop(b, "Velocity").map(|v| v.as_vec()).unwrap_or_default();
-            let sp = (v[0] * v[0] + v[1] * v[1]).sqrt();
-            let bl = vm.actor_loc(b);
-            let at = [bl[0] - v[0] / sp * 90.0, bl[1] - v[1] / sp * 90.0, bl[2] + 5.0];
-            if !uscript::host::Host::move_actor(&*host, vm, pp, at, false) {
-                continue;
-            }
-            // Aim at the head as drawn: the body's head bone (the head mesh sits on it).
-            let world = p2game::host::actor_world(vm, b);
-            let Some(hb) = host.with_inst(vm, b, |i| i.get_bone_coords("MALE01 head")).flatten().map(|c| world.transform_point3(c.origin)) else { continue };
-            let eye = vm.actor_loc(pp);
-            let eh = vm.get_prop(pp, "EyeHeight").map(|v| v.as_float()).unwrap_or(0.0);
-            let d = [hb.x - eye[0], hb.y - eye[1], hb.z + 3.0 - (eye[2] + eh)];
-            let yaw = (d[1].atan2(d[0]) * 32768.0 / std::f32::consts::PI) as i32 & 0xffff;
-            let pitch = (d[2].atan2((d[0] * d[0] + d[1] * d[1]).sqrt()) * 32768.0 / std::f32::consts::PI) as i32 & 0xffff;
-            vm.set_prop(pc, "Rotation", Value::Rotator([pitch, yaw, 0]));
-            vm.set_prop(pp, "Rotation", Value::Rotator([0, yaw, 0]));
-            let hl = vm.get_prop(b, "MyHead").and_then(|v| v.as_obj()).map(|h| vm.actor_loc(h)).unwrap_or_default();
-            let hp0 = vm.get_prop(b, "Health").map(|v| v.as_int()).unwrap_or(0);
-            let st0 = ctrl_state(vm, b);
-            let before_shot: std::collections::HashSet<ObjId> = vm.actors.iter().copied().collect();
-            let _ = vm.call_event(pc, "Fire", vec![Value::Float(0.0)]);
-            for _ in 0..3 {
-                game.tick(1.0 / 30.0);
-            }
-            let vm = &mut game.world.vm;
-            vm.fire_event(pc, "StopFire", vec![]);
-            let punctured = vm.actors.iter().filter(|x| !before_shot.contains(x)).any(|&x| vm.classes[vm.objects[x].class].name.contains("PuncturedHead"));
-            let hp = vm.get_prop(b, "Health").map(|v| v.as_int()).unwrap_or(0);
-            heads += punctured as usize;
-            kills += (hp <= 0) as usize;
-            println!("#{shots} walker {} speed {sp:.0} [{st0}] headbone {:?} MyHead {hl:?} bone-head z {:.1}; health {hp0} -> {hp} headshot {punctured}", vm.object_name(b), [hb.x, hb.y, hb.z], hb.z - hl[2]);
-            shots += 1;
-            // Let the panic from the shot settle a little before the next victim.
-            for _ in 0..20 {
-                game.tick(1.0 / 30.0);
-            }
-        }
-        println!("WALK HEADSHOTS {heads}/{shots} (kills {kills})");
-        return;
-    }
     for i in 0..n {
         let vm = &mut game.world.vm;
         let pp = vm.get_prop(pc, "Pawn").and_then(|v| v.as_obj()).unwrap();
@@ -214,17 +147,7 @@ fn headshot_probe(game: &mut Game, n: usize, walk: bool) {
                 println!("   f{f} pawn z {:.1} yaw {} phys {:?} head-pawn z {:.1} bone {:?} anim {anim:?}", bl[2], vm.actor_rot(b)[1] & 0xffff, vm.get_prop(b, "Physics"), hl[2] - bl[2], bone.map(|v| format!("{v:?}").chars().take(60).collect::<String>()));
             }
         }
-        let host = game.host.clone();
         let vm = &mut game.world.vm;
-        // P2Pawn.HandleSpecialShots only punctures a head shot from behind: stand 90 uu behind it.
-        {
-            let (bl, by) = (vm.actor_loc(b), vm.actor_rot(b)[1] as f32 * std::f32::consts::TAU / 65536.0);
-            let at = [bl[0] - 90.0 * by.cos(), bl[1] - 90.0 * by.sin(), bl[2] + 5.0];
-            let ok = uscript::host::Host::move_actor(&*host, vm, pp, at, false);
-            if !ok {
-                println!("#{i} could not stand behind");
-            }
-        }
         let head = vm.get_prop(b, "MyHead").and_then(|v| v.as_obj());
         let hl = head.map(|h| vm.actor_loc(h)).unwrap_or_default();
         let target = [hl[0], hl[1], hl[2] + 8.0];
@@ -295,7 +218,7 @@ fn main() {
         return;
     }
     if let Some(n) = get("--headshots").and_then(|s| s.parse::<usize>().ok()) {
-        headshot_probe(&mut game, n, a.iter().any(|x| x == "--walk"));
+        headshot_probe(&mut game, n);
         return;
     }
     let player_pawn = game.player_controller.and_then(|pc| game.world.vm.get_prop(pc, "Pawn").and_then(|v| v.as_obj()));
