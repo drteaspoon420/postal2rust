@@ -747,6 +747,22 @@ struct FpState {
     logged: u32,
 }
 
+/// True if the level sun reaches the eye at `eye` (Unreal units): nothing solid on a line toward
+/// the sun. `dir` is the Bevy light's forward (the direction it shines).
+fn sun_reaches(eye: [f32; 3], dir: Vec3) -> bool {
+    let Some(w) = p2game::physics::level_collision() else { return true };
+    // Bevy (x, y up, z) -> Unreal (x, z, y).
+    let to_sun = Vec3::new(-dir.x, -dir.z, -dir.y).normalize_or_zero();
+    if to_sun == Vec3::ZERO {
+        return true;
+    }
+    let from = Vec3::from(eye);
+    match w.line(from, from + to_sun * 20000.0) {
+        None => true,
+        Some(h) => !h.start_solid && h.t >= 0.98,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn fp_weapon(
     mut commands: Commands,
@@ -759,7 +775,7 @@ fn fp_weapon(
     mut bindposes: ResMut<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>,
     mut cams: Query<(&mut Transform, &mut Projection, &mut Camera), With<FpCamera>>,
     mut keys: Query<(&mut Transform, &mut DirectionalLight), (With<FpKeyLight>, Without<FpCamera>)>,
-    suns: Query<&DirectionalLight, Without<FpKeyLight>>,
+    suns: Query<(&DirectionalLight, &GlobalTransform), Without<FpKeyLight>>,
     mut tfs: Query<&mut Transform, (Without<FpCamera>, Without<FpKeyLight>)>,
     mut vis: Query<&mut Visibility>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
@@ -848,13 +864,24 @@ fn fp_weapon(
     let fwd = swap(r.x_axis.truncate()).normalize_or_zero();
     let up = swap(r.z_axis.truncate()).normalize_or_zero();
     *cam_tf = Transform::from_translation(pos).looking_to(fwd, up);
-    // The key light follows the view (from above, slightly left of and behind the eye).
+    // The key light: the level sun's direction when it reaches the eye, else from above, slightly
+    // left of and behind the eye.
     if let Ok((mut ltf, mut light)) = keys.single_mut() {
         let right = fwd.cross(up).normalize_or_zero();
-        *ltf = Transform::from_translation(pos).looking_to(fwd * 0.8 - up * 0.6 + right * 0.3, up);
+        let sun = suns.iter().max_by(|a, b| a.0.illuminance.total_cmp(&b.0.illuminance));
+        // UE2 lights the view model like any actor, by the level's lights in world space: the sun
+        // shines from its own direction, so facing the sun (suburbs-3 start, orig_pfe_00: palm
+        // 136,86,61, slide dark steel) the visible side of the gun and hands is in their own
+        // shade, and with the sun behind (squid's fo.png, palm 219,129,87) it is lit. A light
+        // fixed above-behind the eye lit the visible side always (FIDELITY #15, flat and bright).
+        // Where the sun does not reach the eye (indoors, no Sunlight) the earlier view-fixed key
+        // stays (stand-in for the room's point lights; no original indoor reference yet).
+        let sun_dir = sun.map(|s| s.1.forward().as_vec3()).filter(|d| std::env::var_os("P2GAME_FP_VIEW_KEY").is_none() && sun_reaches(c.location, *d));
+        let key_dir = sun_dir.unwrap_or(fwd * 0.8 - up * 0.6 + right * 0.3);
+        *ltf = Transform::from_translation(pos).looking_to(key_dir, if key_dir.normalize_or_zero().y.abs() > 0.99 { fwd } else { Vec3::Y });
         // UE2 lights the view model with the level's lights like any actor: outdoors the warm
         // sun colours the hands (FIDELITY #15). Take the colour of the level's brightest sun.
-        let color = suns.iter().max_by(|a, b| a.illuminance.total_cmp(&b.illuminance)).map(|s| s.color).unwrap_or(Color::WHITE);
+        let color = sun.map(|s| s.0.color).unwrap_or(Color::WHITE);
         if light.color != color {
             light.color = color;
         }

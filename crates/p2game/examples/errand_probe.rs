@@ -1179,6 +1179,19 @@ fn run() {
                     wt_left = rest.trim().parse().unwrap_or(150);
                     wt_last.clear();
                 }
+                "tp" => {
+                    // `tp X,Y,Z YAW`: put the player pawn at a point facing YAW (Unreal units).
+                    let (p, yaw) = rest.split_once(' ').map(|(p, y)| (p, y.trim().parse::<i32>().unwrap_or(0))).unwrap_or((rest, 0));
+                    let v: Vec<f32> = p.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+                    let pc = game.player_controller.unwrap();
+                    let host = game.host.clone();
+                    let vm = &mut game.world.vm;
+                    let pawn = vm.get_prop(pc, "Pawn").and_then(|v| v.as_obj()).unwrap();
+                    let ok = v.len() == 3 && host.move_actor(vm, pawn, [v[0], v[1], v[2]], false);
+                    vm.set_prop(pc, "Rotation", Value::Rotator([0, yaw, 0]));
+                    vm.set_prop(pawn, "Rotation", Value::Rotator([0, yaw, 0]));
+                    println!("t={t:.1}s tp {rest} -> {ok}");
+                }
                 "drive" => {
                     // `drive FWD JUMP DUCK WALK FRAMES`: hold movement input for FRAMES (PlayerTick
                     // with aForward/bPressedJump/bDuck/bRun like the key bindings), logging speed.

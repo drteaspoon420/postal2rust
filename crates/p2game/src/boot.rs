@@ -106,6 +106,18 @@ impl Game {
         *self.host.level_objects.borrow_mut() = level.objects.clone();
         world.vm.set_host(self.host.clone());
         crate::host::run_level_hooks(&self.host, &mut world.vm);
+        // P2GameInfoSingle.PrepActorsByGroup destroys the map actors whose Group names another
+        // day or an inactive holiday, static meshes included (the teen sniper, holiday
+        // decorations); the engine lets level-start script remove those bStatic actors.
+        world.vm.watch_calls("PrepActorsByGroup", |vm, _, _, after| vm.allow_static_destroy = !after);
+        // No date-based holiday content (Valentine's, St Patrick's, Easter, Halloween, Christmas,
+        // April Fools): P2GameInfoSingle.IsHoliday returns false when bNoHolidays is set, so the
+        // holiday decorations and spawners stay out like the normal game.
+        world.vm.watch_calls("IsHoliday", |vm, me, _, after| {
+            if let (Some(me), false) = (me, after) {
+                vm.set_prop(me, "bNoHolidays", Value::Bool(true));
+            }
+        });
         boot_lap(t0, "level hooks");
         (self.game_info, self.game_class, self.player_controller, self.time) = (None, "(none)".into(), None, 0.0);
         let gc = Self::game_class(world, level, game_override);

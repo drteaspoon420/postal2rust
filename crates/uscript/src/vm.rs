@@ -46,6 +46,11 @@ use upkg::ObjRef;
 mod state;
 pub use state::{Latent, PROBE_NAMES, StateFrame, probe_bit};
 
+/// HashMap with foldhash's fixed-seed hasher: the interpreter's per-statement lookups (locals,
+/// instance variables, functions, states, natives) are on small integer keys, where std's
+/// SipHash cost dominated. Fixed seed, so behaviour is deterministic; nothing iterates these maps.
+pub type FastMap<K, V> = HashMap<K, V, foldhash::fast::FixedState>;
+
 /// A script field (class, function, property, ...) identified by loaded-package index and export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FieldId {
@@ -267,10 +272,10 @@ pub struct ClassInfo {
     /// Class flags (see [`CLASS_ABSTRACT`]).
     pub flags: u32,
     pub slots: Vec<Slot>,
-    pub slot_by_field: HashMap<FieldId, usize>,
+    pub slot_by_field: FastMap<FieldId, usize>,
     pub defaults: Vec<Value>,
     /// Lower-case property name to slot (the most derived declaration wins).
-    pub slot_index: HashMap<Box<str>, usize>,
+    pub slot_index: FastMap<Box<str>, usize>,
 }
 
 /// Runs `f` on an ASCII-lowercased copy of `s` without allocating for short names.
@@ -336,7 +341,7 @@ pub struct FuncInfo {
     /// Indices into `locals` of the parameters (excluding the return value).
     pub params: Vec<usize>,
     pub ret: Option<usize>,
-    pub local_index: HashMap<u32, usize>,
+    pub local_index: FastMap<u32, usize>,
     /// Native implementation, resolved on first call (None inside = not registered).
     pub native_fn: std::cell::Cell<Option<Option<NativeFn>>>,
     /// Probe bit of the function name (for `ignores`), if it is a probe function.
@@ -471,20 +476,20 @@ pub struct Vm {
     pub pkgs: Vec<Rc<ScriptPackage>>,
     pkg_by_name: HashMap<String, Option<usize>>,
     pub classes: Vec<ClassInfo>,
-    class_by_field: HashMap<FieldId, ClassId>,
-    class_by_name: HashMap<u64, ClassId>,
+    class_by_field: FastMap<FieldId, ClassId>,
+    class_by_name: FastMap<u64, ClassId>,
     pub objects: Vec<Object>,
     natives: HashMap<String, NativeFn>,
     /// Script functions observed by the host, by lowercase name.
     watches: HashMap<String, CallWatch>,
     /// Names handled by the VM outside the native registry (latent functions, iterators).
     builtin: HashSet<String>,
-    native_decl: HashMap<u16, FieldId>,
-    funcs: HashMap<FieldId, Rc<FuncInfo>>,
-    func_lookup: HashMap<(ClassId, u64), Option<FieldId>>,
-    state_lookup: HashMap<(FieldId, u64), Option<FieldId>>,
-    state_by_name: HashMap<(ClassId, u64), Option<FieldId>>,
-    resolve_cache: HashMap<(usize, i32), Option<FieldId>>,
+    native_decl: FastMap<u16, FieldId>,
+    funcs: FastMap<FieldId, Rc<FuncInfo>>,
+    func_lookup: FastMap<(ClassId, u64), Option<FieldId>>,
+    state_lookup: FastMap<(FieldId, u64), Option<FieldId>>,
+    state_by_name: FastMap<(ClassId, u64), Option<FieldId>>,
+    resolve_cache: FastMap<(usize, i32), Option<FieldId>>,
     /// Class-typed default values waiting for their class to be loaded.
     pending_class_defaults: Vec<(ClassId, usize, Vec<DefSeg>, FieldId)>,
     /// Subobject references found while converting class defaults, resolved after loading.
@@ -492,7 +497,7 @@ pub struct Vm {
     /// Subobject references found by `convert_ref` (relative path, export), drained by callers.
     pending_subobjects: Vec<Pending>,
     /// Instantiated package subobjects, by export.
-    subobjects: HashMap<FieldId, ObjId>,
+    subobjects: FastMap<FieldId, ObjId>,
     /// Every object id ever created as a package subobject (including superseded instances), so
     /// a level reset can repoint any class default that still holds one.
     subobject_of: HashMap<ObjId, FieldId>,
@@ -532,6 +537,10 @@ pub struct Vm {
     pub level: Option<ObjId>,
     actor_class: Option<Option<ClassId>>,
     pub(crate) destroyed_pending: bool,
+    /// While set, `Destroy` also removes `bStatic` actors (not `bNoDelete` ones). The host sets it
+    /// around `P2GameInfoSingle.PrepActorsByGroup`, which destroys the map's static meshes that
+    /// belong to other days or holidays at level start, as the original engine allows.
+    pub allow_static_destroy: bool,
     localized: HashMap<String, Option<HashMap<(String, String), String>>>,
     /// Navigation network and route-search state (see [`crate::nav`]).
     pub nav: crate::nav::NavState,
@@ -547,22 +556,22 @@ impl Vm {
             pkgs: Vec::new(),
             pkg_by_name: HashMap::new(),
             classes: Vec::new(),
-            class_by_field: HashMap::new(),
-            class_by_name: HashMap::new(),
+            class_by_field: FastMap::default(),
+            class_by_name: FastMap::default(),
             objects: Vec::new(),
             natives: HashMap::new(),
             watches: HashMap::new(),
             builtin: HashSet::new(),
-            native_decl: HashMap::new(),
-            funcs: HashMap::new(),
-            func_lookup: HashMap::new(),
-            state_lookup: HashMap::new(),
-            state_by_name: HashMap::new(),
-            resolve_cache: HashMap::new(),
+            native_decl: FastMap::default(),
+            funcs: FastMap::default(),
+            func_lookup: FastMap::default(),
+            state_lookup: FastMap::default(),
+            state_by_name: FastMap::default(),
+            resolve_cache: FastMap::default(),
             pending_class_defaults: Vec::new(),
             pending_class_subobjects: Vec::new(),
             pending_subobjects: Vec::new(),
-            subobjects: HashMap::new(),
+            subobjects: FastMap::default(),
             subobject_of: HashMap::new(),
             frames: Vec::new(),
             host: Rc::new(DefaultHost),
@@ -589,6 +598,7 @@ impl Vm {
             level: None,
             actor_class: None,
             destroyed_pending: false,
+            allow_static_destroy: false,
             localized: HashMap::new(),
             nav: Default::default(),
             config: Default::default(),
@@ -892,7 +902,7 @@ impl Vm {
         };
         let (mut slots, mut slot_by_field, mut defaults) = match super_ {
             Some(s) => (self.classes[s].slots.clone(), self.classes[s].slot_by_field.clone(), self.classes[s].defaults.clone()),
-            None => (Vec::new(), HashMap::new(), Vec::new()),
+            None => (Vec::new(), FastMap::default(), Vec::new()),
         };
         for c in sp.children(f.export as usize) {
             if let Some(ScriptObject::Property(p)) = &sp.objects[c] {
@@ -1419,7 +1429,7 @@ impl Vm {
             locals: Vec::new(),
             params: Vec::new(),
             ret: None,
-            local_index: HashMap::new(),
+            local_index: FastMap::default(),
             native_fn: std::cell::Cell::new(None),
             watch: None,
         };

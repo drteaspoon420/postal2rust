@@ -485,7 +485,7 @@ impl Vm {
         if self.objects[a].deleted {
             return true;
         }
-        if self.prop_bool(a, "bNoDelete") || self.prop_bool(a, "bStatic") {
+        if self.prop_bool(a, "bNoDelete") || (self.prop_bool(a, "bStatic") && !self.allow_static_destroy) {
             return false;
         }
         self.fire_event(a, "Destroyed", vec![]);

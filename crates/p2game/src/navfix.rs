@@ -25,6 +25,8 @@ const STEP: f32 = 96.0;
 const MAX_DROP: f32 = 200.0;
 /// Longest straight walk tested (UE2 caps reachability tests at about this distance).
 const MAX_DIST: f32 = 3000.0;
+/// Riser re-climbs allowed in one walk test (a flight of stairs is about 10 to 20 risers).
+const MAX_CLIMBS: u32 = 48;
 
 pub fn disabled() -> bool {
     std::env::var_os("P2GAME_NO_NAVFIX").is_some()
@@ -65,15 +67,35 @@ pub enum Walk {
 
 /// Walks a cylinder (centre `from`) toward `to`. `step` is the climbable height.
 pub fn walk_test(w: &mut impl Sweep, from: Vec3, to: Vec3, radius: f32, half_height: f32, step: f32) -> Walk {
-    // Slightly thinner than the pawn: brushing a wall corner is not blocking.
     let (r, h) = ((radius * 0.9).max(1.0), half_height.max(1.0));
-    let at = |a: Vec3, b: Vec3, t: f32| a + (b - a) * t;
     let flat = Vec3::new(to.x - from.x, to.y - from.y, 0.0);
     let total = flat.length();
     if total < 1.0 {
         return Walk::Reached;
     }
-    let dir = flat / total;
+    let (res, pos, wall_end) = walk_along(w, from, flat / total, total, radius, half_height, step);
+    if res != Walk::Reached {
+        return res;
+    }
+    // The walk must end at the destination's height, above or below: a node on the floor under
+    // the pawn (Lucky Ganesh: upstairs terrorists vs the ground-floor HomeNode) is not reachable
+    // by walking straight, the route has to take the stairs. Also when it ends against a wall
+    // next to the goal (a ladder top or ledge above a wall is not reached from the floor below).
+    if off_level(w, pos, to, r, h, step) {
+        return Walk::Blocked(if wall_end { 0.99 } else { 1.0 });
+    }
+    Walk::Reached
+}
+
+/// Walks `total` UU along the horizontal unit `dir` like UE2's walking move: each segment steps
+/// up by `step`, moves across, then drops to the floor. A wall met part way is tried again from
+/// the contact (stairs are a run of risers under `step` each, closer together than a segment),
+/// so only a wall the pawn cannot step onto blocks. A wall within a radius of the end counts as
+/// arrival. Returns the result, the floor position reached and whether it ended at a wall.
+fn walk_along(w: &mut impl Sweep, from: Vec3, dir: Vec3, total: f32, radius: f32, half_height: f32, step: f32) -> (Walk, Vec3, bool) {
+    // Slightly thinner than the pawn: brushing a wall corner is not blocking.
+    let (r, h) = ((radius * 0.9).max(1.0), half_height.max(1.0));
+    let at = |a: Vec3, b: Vec3, t: f32| a + (b - a) * t;
     let mut pos = from;
     // Settle on the floor first (the pawn may be mid-step).
     let settle = pos - Vec3::Z * (step + 4.0);
@@ -83,6 +105,7 @@ pub fn walk_test(w: &mut impl Sweep, from: Vec3, to: Vec3, radius: f32, half_hei
         }
     }
     let mut done = 0.0;
+    let mut climbs = 0;
     while done < total {
         let seg = (total - done).min(STEP);
         // Up by the step height, across, then down to the floor (UE2 stepUp).
@@ -93,48 +116,43 @@ pub fn walk_test(w: &mut impl Sweep, from: Vec3, to: Vec3, radius: f32, half_hei
             None => up_to,
         };
         let across_to = up + dir * seg;
-        let across = match w.sweep(up, across_to, r, h) {
-            Some((_, _, true)) => return Walk::Blocked(done / total),
+        let (across, got) = match w.sweep(up, across_to, r, h) {
+            Some((_, _, true)) => return (Walk::Blocked(done / total), pos, true),
             Some((t, n, _)) => {
-                let hit = at(up, across_to, t);
-                // A wall: blocked unless the goal is within a radius of the contact. A walkable
-                // slope: continue from the contact (the down trace follows it).
+                // Stop a little short of the contact: a sweep that starts touching a wall can
+                // miss it, letting the next segment pass through.
+                let hit = at(up, across_to, t) - if n.z < 0.7 { dir * 2.0 } else { Vec3::ZERO };
+                let got = Vec3::new(hit.x - up.x, hit.y - up.y, 0.0).length().max(0.0);
+                // A walkable slope: continue from the contact (the down trace follows it).
                 if n.z < 0.7 {
-                    let got = (hit - up).length();
-                    if got + done + radius < total {
-                        return Walk::Blocked((done + got) / total);
+                    if got + done + radius >= total {
+                        return (Walk::Reached, pos, true);
                     }
-                    // Arrived at the wall next to the goal: still has to be on its level (a
-                    // ladder top or ledge above a wall is not reached from the floor below).
-                    if off_level(w, pos, to, r, h, step) {
-                        return Walk::Blocked((done + got) / total);
+                    // A wall right in front (no headway at step height), or too many risers:
+                    // blocked. Otherwise go on from the contact; the next segment steps up again.
+                    if got < 4.0 || climbs >= MAX_CLIMBS {
+                        return (Walk::Blocked((done + got) / total), pos, true);
                     }
-                    return Walk::Reached;
+                    climbs += 1;
                 }
-                hit
+                (hit, got)
             }
-            None => across_to,
+            None => (across_to, seg),
         };
         let down_to = across - Vec3::Z * (step * 2.0 + MAX_DROP);
         match w.sweep(across, down_to, r, h) {
             Some((t, n, false)) => {
                 let floor = at(across, down_to, t);
                 if n.z < 0.7 && (across.z - floor.z) > step * 2.0 {
-                    return Walk::Drop((done + seg) / total);
+                    return (Walk::Drop((done + got) / total), pos, false);
                 }
                 pos = floor;
             }
-            _ => return Walk::Drop((done + seg) / total),
+            _ => return (Walk::Drop((done + got) / total), pos, false),
         }
-        done += seg;
+        done += got;
     }
-    // The walk must end at the destination's height, above or below: a node on the floor under
-    // the pawn (Lucky Ganesh: upstairs terrorists vs the ground-floor HomeNode) is not reachable
-    // by walking straight, the route has to take the stairs.
-    if off_level(w, pos, to, r, h, step) {
-        return Walk::Blocked(1.0);
-    }
-    Walk::Reached
+    (Walk::Reached, pos, false)
 }
 
 /// Whether a walk that ended standing at `pos` is on another level than `to`. Navigation points
@@ -188,15 +206,10 @@ pub fn install(vm: &mut Vm) {
 /// Returns `dir` when the way is clear, and None when every probed heading is blocked.
 #[allow(clippy::too_many_arguments)]
 pub fn steer_dir(w: &mut impl Sweep, here: Vec3, dir: Vec3, look: f32, radius: f32, half_height: f32, step: f32, prefer_side: f32) -> Option<Vec3> {
-    let (r, h) = ((radius * 0.9).max(1.0), (half_height * 0.8).max(1.0));
-    // Probe at step height so stairs and kerbs do not count as obstacles.
-    let origin = here + Vec3::Z * (step + 2.0);
-    let mut clear = |d: Vec3| -> bool {
-        match w.sweep(origin, origin + d * look, r, h) {
-            None => true,
-            Some((_, n, solid)) => !solid && n.z >= 0.7,
-        }
-    };
+    // Walk-tested (step up, across, down), so stairs and kerbs are not obstacles: a single sweep
+    // at step height saw the third riser of a staircase as a wall and turned pawns away from
+    // stairs their route goes up (suburbs-3 6200,-7000). Ledges are left to the route.
+    let mut clear = |d: Vec3| -> bool { !matches!(walk_along(w, here, d, look, radius, half_height * 0.8, step).0, Walk::Blocked(_)) };
     if clear(dir) {
         return Some(dir);
     }
@@ -249,6 +262,24 @@ mod tests {
         assert!(d.x < 0.95 && d.y.abs() > 0.3, "deflected heading {d:?}");
         let open = steer_dir(&mut w, Vec3::new(0.0, 600.0, 44.0), Vec3::X, 150.0, 25.0, 44.0, 35.0, 1.0).unwrap();
         assert!((open - Vec3::X).length() < 1e-5);
+    }
+
+    /// Stairs: 12 risers of 16 UU every 24 UU from x=100 (steeper than one step per segment),
+    /// then a landing.
+    #[test]
+    fn stairs_are_walkable_and_steerable() {
+        let mut t = quad(Vec3::new(-1000.0, -1000.0, 0.0), Vec3::new(100.0, -1000.0, 0.0), Vec3::new(100.0, 1000.0, 0.0), Vec3::new(-1000.0, 1000.0, 0.0));
+        for k in 0..12 {
+            let (x0, z0, z1) = (100.0 + k as f32 * 24.0, k as f32 * 16.0, (k + 1) as f32 * 16.0);
+            let x1 = if k == 11 { 1000.0 } else { x0 + 24.0 };
+            t.extend(quad(Vec3::new(x0, -200.0, z0), Vec3::new(x0, 200.0, z0), Vec3::new(x0, 200.0, z1), Vec3::new(x0, -200.0, z1)));
+            t.extend(quad(Vec3::new(x0, -200.0, z1), Vec3::new(x1, -200.0, z1), Vec3::new(x1, 200.0, z1), Vec3::new(x0, 200.0, z1)));
+        }
+        let mut w = World::from_triangles(t);
+        let top = Vec3::new(700.0, 0.0, 192.0 + 44.0);
+        assert_eq!(walk_test(&mut w, Vec3::new(0.0, 0.0, 44.0), top, 25.0, 44.0, 35.0), Walk::Reached);
+        let d = steer_dir(&mut w, Vec3::new(60.0, 0.0, 44.0), Vec3::X, 150.0, 25.0, 44.0, 35.0, 1.0).unwrap();
+        assert!((d - Vec3::X).length() < 1e-5, "stairs deflected steering: {d:?}");
     }
 
     #[test]

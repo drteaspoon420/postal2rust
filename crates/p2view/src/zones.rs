@@ -4,6 +4,11 @@
 //! cut off by the fog far plane as the camera moved (intro.fuk: the drive into Paradise sits in
 //! zone 27, which has no portals; its 218 statics are the only ones the original draws there,
 //! the other 450 in zones 2/23/24... appeared and vanished at 952 m as "map culling in").
+//!
+//! Zone numbers are bytes on the BSP nodes and some shipped maps use more than 64 of them
+//! (suburbs-3 has 71: the laundromat is zones 68-70), so the sets are 256 bits wide. With a
+//! 64-bit set the laundromat's zones were clamped to 63, which zone 1 cannot reach, and its
+//! washers, dryers and floor vanished from outside, leaving only the boundary walls.
 
 use bevy::prelude::*;
 use std::sync::Arc;
@@ -12,42 +17,74 @@ use std::sync::Arc;
 #[derive(Component, Clone, Copy)]
 pub struct ZoneTag(pub u8);
 
+/// A set of zone numbers (0..=255).
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub struct ZoneSet([u64; 4]);
+
+impl ZoneSet {
+    pub const ALL: ZoneSet = ZoneSet([u64::MAX; 4]);
+
+    pub fn contains(&self, z: u8) -> bool {
+        self.0[(z >> 6) as usize] & (1u64 << (z & 63)) != 0
+    }
+
+    pub fn insert(&mut self, z: u8) {
+        self.0[(z >> 6) as usize] |= 1u64 << (z & 63);
+    }
+
+    fn union(&mut self, o: &ZoneSet) {
+        for (a, b) in self.0.iter_mut().zip(o.0) {
+            *a |= b;
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..=255u8).filter(|&z| self.contains(z))
+    }
+}
+
+impl std::fmt::LowerHex for ZoneSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}{:016x}{:016x}{:016x}", self.0[3], self.0[2], self.0[1], self.0[0])
+    }
+}
+
 #[derive(Resource)]
 pub struct ZoneGraph {
-    adj: Vec<u64>,
+    adj: Vec<ZoneSet>,
     bsp: Option<Arc<p2collide::bsp::Bsp>>,
     last: Option<usize>,
 }
 
 impl ZoneGraph {
     pub fn new(portals: &[(u8, u8)], bsp: Option<Arc<p2collide::bsp::Bsp>>) -> Self {
-        let mut adj = vec![0u64; 64];
+        let mut adj = vec![ZoneSet::default(); 256];
         for &(a, b) in portals {
-            if a < 64 && b < 64 {
-                adj[a as usize] |= 1 << b;
-                adj[b as usize] |= 1 << a;
-            }
+            adj[a as usize].insert(b);
+            adj[b as usize].insert(a);
         }
         ZoneGraph { adj, bsp, last: None }
     }
 
     /// Zones reachable from `z` through portals, not passing through zone 0 (the unzoned void).
-    pub fn reachable(&self, z: usize) -> u64 {
-        if z == 0 || z >= 64 {
-            return u64::MAX;
+    pub fn reachable(&self, z: usize) -> ZoneSet {
+        if z == 0 || z > 255 {
+            return ZoneSet::ALL;
         }
-        let mut seen = 1u64 << z;
-        let mut todo = vec![z];
+        let mut seen = ZoneSet::default();
+        seen.insert(z as u8);
+        let mut todo = vec![z as u8];
         while let Some(c) = todo.pop() {
-            let mut n = self.adj[c] & !seen & !1;
-            seen |= self.adj[c];
-            while n != 0 {
-                let o = n.trailing_zeros() as usize;
-                n &= n - 1;
-                todo.push(o);
+            let n = self.adj[c as usize];
+            for o in n.iter() {
+                if o != 0 && !seen.contains(o) {
+                    todo.push(o);
+                }
             }
+            seen.union(&n);
         }
-        seen | 1
+        seen.insert(0);
+        seen
     }
 }
 
@@ -68,12 +105,30 @@ pub fn zone_cull(mut graph: Option<ResMut<ZoneGraph>>, cams: Query<(&GlobalTrans
     g.last = Some(zone);
     let vis = g.reachable(zone);
     if std::env::var_os("P2VIEW_ZONE_TRACE").is_some() {
-        println!("ZONECULL camera zone {zone} visible {vis:#x}");
+        println!("ZONECULL camera zone {zone} visible {vis:x}");
     }
     for (t, mut v) in &mut q {
-        let want = if vis & (1u64 << t.0.min(63)) != 0 { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if vis.contains(t.0) { Visibility::Inherited } else { Visibility::Hidden };
         if *v != want {
             *v = want;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zones_above_63_are_reached() {
+        // suburbs-3 laundromat: 1-68, 68-69, 69-70, 70-1; zone 63 hangs off 64, which joins 1.
+        let g = ZoneGraph::new(&[(1, 68), (68, 69), (69, 70), (1, 70), (1, 64), (63, 64), (62, 63)], None);
+        let v = g.reachable(1);
+        for z in [0, 1, 62, 63, 64, 68, 69, 70] {
+            assert!(v.contains(z), "zone {z}");
+        }
+        assert!(!v.contains(65));
+        let v = g.reachable(69);
+        assert!(v.contains(1) && v.contains(62) && !v.contains(65));
     }
 }

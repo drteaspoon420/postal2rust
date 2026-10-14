@@ -97,6 +97,9 @@ pub struct World {
     pub player_starts: Vec<(Vec3, f32)>,
     pub pawn: PawnParams,
     pub stats: WorldStats,
+    /// Static mesh actors (map export index) destroyed at runtime; their triangles stop colliding.
+    /// Level-start script removes the meshes of other days and holidays (PrepActorsByGroup).
+    removed: std::sync::RwLock<std::collections::HashSet<u32>>,
 }
 
 /// Collision triangles of a StaticMesh in mesh space: its stored collision triangles when it
@@ -335,7 +338,7 @@ impl World {
 
         let bvh = Bvh::build(&tris);
         stats.load_ms = t0.elapsed().as_millis();
-        Ok(World { tris, sources, tri_mat, materials: mats.paths, bvh, bsp, zones, terrains, player_starts, pawn, stats })
+        Ok(World { tris, sources, tri_mat, materials: mats.paths, bvh, bsp, zones, terrains, player_starts, pawn, stats, removed: Default::default() })
     }
 
     /// An empty world containing only the given triangles (tests and tools).
@@ -343,7 +346,7 @@ impl World {
         let sources = vec![Source::Bsp; tris.len()];
         let tri_mat = vec![NO_MATERIAL; tris.len()];
         let bvh = Bvh::build(&tris);
-        World { tris, sources, tri_mat, materials: vec![], bvh, bsp: Bsp::empty(), zones: vec![], terrains: vec![], player_starts: vec![], pawn: PawnParams::default(), stats: WorldStats::default() }
+        World { tris, sources, tri_mat, materials: vec![], bvh, bsp: Bsp::empty(), zones: vec![], terrains: vec![], player_starts: vec![], pawn: PawnParams::default(), stats: WorldStats::default(), removed: Default::default() }
     }
 
     /// Path of a hit's material ("Package.Group.Name").
@@ -365,6 +368,17 @@ impl World {
             hi = hi.max(*p);
         }
         Some(Aabb { min: lo, max: hi })
+    }
+
+    /// Stops the triangles of a level static mesh actor (map export index) from colliding.
+    pub fn remove_actor(&self, export: u32) {
+        if let Ok(mut r) = self.removed.write() {
+            r.insert(export);
+        }
+    }
+
+    fn is_removed(&self, export: u32) -> bool {
+        self.removed.read().is_ok_and(|r| !r.is_empty() && r.contains(&export))
     }
 
     /// Sweeps `shape` from `start` to `end`; returns the first blocking contact.
@@ -391,7 +405,7 @@ impl World {
                 let src = self.sources[i as usize];
                 let wanted = match src {
                     Source::Bsp => flags.world,
-                    Source::Actor(_) => flags.actors,
+                    Source::Actor(e) => flags.actors && !self.is_removed(e),
                     Source::Terrain(_) => flags.terrain,
                 };
                 if wanted {
@@ -434,7 +448,7 @@ impl World {
             self.bvh.query(b, |i| {
                 let wanted = match self.sources[i as usize] {
                     Source::Bsp => flags.world,
-                    Source::Actor(_) => flags.actors,
+                    Source::Actor(e) => flags.actors && !self.is_removed(e),
                     Source::Terrain(_) => flags.terrain,
                 };
                 if wanted {

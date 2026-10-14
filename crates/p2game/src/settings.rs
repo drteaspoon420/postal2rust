@@ -293,6 +293,16 @@ fn menu_created(vm: &mut Vm, me: Option<ObjId>, _a: &mut [Value], after: bool) {
     let (Some(me), true) = (me, after) else { return };
     let class = vm.classes[vm.objects[me].class].name.clone();
     let dead: Vec<ObjId> = dead_controls(&class).iter().filter_map(|n| prop_obj(vm, me, n)).collect();
+    if class == "MenuOptions" || class == "AWMenuOptions" {
+        // The "??????????" choice (locked until Hestonworld is beaten; "Holidays" once unlocked or
+        // with the debug menu) becomes a link to this port's source repository.
+        for n in ["LockedChoice", "UnlockedChoice"] {
+            if let Some(c) = prop_obj(vm, me, n) {
+                call(vm, c, "SetText", vec![Value::Str("Github".into())]);
+                call(vm, c, "SetHelpText", vec![Value::Str(format!("Open the Postal 2 Rust/Bevy source code on GitHub ({REPO_URL})."))]);
+            }
+        }
+    }
     if class == "MenuVideo" {
         if let Some(cb) = prop_obj(vm, me, "TripleBufferCheckbox") {
             call(vm, cb, "SetText", vec![Value::Str("VSync".into())]);
@@ -387,6 +397,44 @@ fn is_version_line(s: &str) -> bool {
     title.eq_ignore_ascii_case("postal2") && rest.split('-').count() >= 3 && rest.split('-').nth(2).is_some_and(|v| v.starts_with(|c: char| c.is_ascii_digit()))
 }
 
+/// Source repository opened by the Options menu's Github choice.
+pub(crate) const REPO_URL: &str = "https://github.com/lukaisimcard/postal2rust";
+
+/// MenuOptions.Notify(Control, Event): a click (DE_Click = 2) on the Github choice opens the
+/// repository in the browser. The control argument is cleared so the script's own handler
+/// (UnlockedChoice opens the Holidays menu) does not run.
+fn options_notify(vm: &mut Vm, me: Option<ObjId>, a: &mut [Value], after: bool) {
+    let (Some(me), false) = (me, after) else { return };
+    let class = &vm.classes[vm.objects[me].class].name;
+    if class != "MenuOptions" && class != "AWMenuOptions" {
+        return;
+    }
+    let Some(c) = a.first().and_then(|v| v.as_obj()) else { return };
+    if !["LockedChoice", "UnlockedChoice"].iter().any(|n| prop_obj(vm, me, n) == Some(c)) {
+        return;
+    }
+    if a.get(1).map(|v| v.as_int()) == Some(2) {
+        open_url(REPO_URL);
+        a[0] = Value::Object(None);
+    }
+}
+
+fn open_url(url: &str) {
+    println!("open url {url}");
+    if std::env::var_os("P2GAME_NO_BROWSER").is_some() {
+        return;
+    }
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = r {
+        eprintln!("open {url}: {e}");
+    }
+}
+
 fn level_hook(host: &p2game::host::GameHost, vm: &mut Vm) {
     // First in the list: these answers win over the fixed viewport replies of older hosts.
     host.ext.borrow_mut().insert(0, Rc::new(SettingsExt));
@@ -394,6 +442,7 @@ fn level_hook(host: &p2game::host::GameHost, vm: &mut Vm) {
     vm.watch_calls("SetGammaSlidersEnabled", gamma_sliders);
     vm.watch_calls("AddSocialIcons", social_icons);
     vm.watch_calls("DrawTextEx", draw_text_ex);
+    vm.watch_calls("Notify", options_notify);
 }
 
 pub(crate) fn install(sim: &mut crate::window::Sim) {

@@ -96,26 +96,22 @@ The port reads your bindings from the game's own `User.ini` / `DefUser.ini`, so 
 Known differences from the original, roughly by impact:
 
 **Gameplay and AI**
-- Apocalypse Weekend Sunday: zombies taunt but rarely attack.
-- Thursday: some errand items (Krotchy, steak) do not reveal their errands when given by cheat.
-- Paycheck errand: the Vince / RWS scene does not play when the map is loaded directly.
-- NPC pathfinding is improved but crowds can still get stuck in tight spots (mall interiors especially).
+- NPC pathfinding handles stairs and blocked spots much better, but busy queues (the EastMall food court) can still jostle.
 - Some pawns use poses or idle animations that differ from the original.
+- Wandering NPCs can cause a short hitch when they pick a new random destination.
 
 **Rendering**
 - Lighting, sky and fog colours differ: outdoor maps look brighter and cooler than the original's warm haze; some night and interior maps (MilitaryBase cells, VincesHouse sky) are off.
-- First-person weapons are lit flatter than the original.
-- Pistol muzzle flash is missing; explosions and the grenade blast look different; tracers are unchecked.
+- Explosions and the grenade blast look different (yellow-grey cloud instead of an orange flash with brown smoke); tracers are unchecked.
 - A few missing details (e.g. the US flag poster in the police station).
 
 **Interface**
-- Map screen: fade timing, the "you are here" arrow and the "Press Enter/Space to continue" prompt.
-- Map paper colour, a missing "Purge Workshop" entry in Options, the selected item at the start of Apocalypse Weekend.
+- No known differences left in the map screen; report anything you spot.
 
 **Not started / out of scope**
 - Multiplayer.
 - POSTAL 2: Paradise Lost (out of scope).
-- Linux / macOS builds (the code is mostly portable but only Windows is built and tested).
+- Linux and macOS builds are produced by CI but have had little testing so far; please report problems.
 
 ## Building from source
 

@@ -133,6 +133,14 @@ fn route(vm: &Vm, from: [f32; 3], to: [f32; 3]) -> Vec<[f32; 3]> {
     };
     let starts = near(from, 8);
     let ends = near(to, 8);
+    // Prefer end nodes the pawn can walk to / from (the AI reachability walk against the level and
+    // static blockers): the nearest node can sit behind glass (suburbs-3 laundromat storefront,
+    // BlockingVolume106 at -4030,-11188 with PathNode257 115 UU inside), and `go` walked into the
+    // window. Falls back to the plain nearest nodes.
+    let walkable = |a: [f32; 3], b: [f32; 3]| p2game::physics::current().and_then(|ph| ph.world.try_borrow_mut().ok().map(|mut w| matches!(p2game::navfix::walk_test(&mut *w, Vec3::from(a), Vec3::from(b), 25.0, 69.0, 35.0), p2game::navfix::Walk::Reached))).unwrap_or(true);
+    let keep = |v: Vec<(u32, f32)>, f: &dyn Fn(u32) -> bool| -> Vec<(u32, f32)> { let ok: Vec<(u32, f32)> = v.iter().copied().filter(|&(k, _)| f(k)).collect(); if ok.is_empty() { v } else { ok } };
+    let starts = keep(starts, &|k| walkable(from, g.node_location(k)));
+    let ends = keep(ends, &|k| walkable(g.node_location(k), to));
     if starts.is_empty() || ends.is_empty() {
         return vec![to];
     }

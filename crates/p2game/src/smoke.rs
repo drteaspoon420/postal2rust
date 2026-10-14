@@ -269,7 +269,9 @@ impl SmokeDriver {
                 if traveled {
                     self.note(format!("traveled to {}", game.level.map.name));
                     self.finish(game, true);
-                } else if secs > 60.0 {
+                } else if secs > 60.0 && self.frames_in_stage > 900 {
+                    // Both a time and a frame budget: on a loaded machine 60 s can pass in a few
+                    // hundred frames, before the four menus have been clicked through.
                     self.note("no travel after clicking through the menus");
                     self.finish(game, false);
                 }

@@ -52,6 +52,9 @@ pub struct PhysHost {
     mesh_actors: RefCell<std::collections::HashMap<ObjId, String>>,
     /// Per-controller steering state for MoveTo/MoveToward (see `steer`).
     nav: RefCell<std::collections::HashMap<ObjId, SteerState>>,
+    /// Map export of each level static mesh actor baked into the level collision, so its
+    /// triangles can stop colliding when script destroys it (PrepActorsByGroup).
+    baked_exports: RefCell<std::collections::HashMap<ObjId, u32>>,
 }
 
 /// Obstacle steering memory of one moving controller.
@@ -533,6 +536,28 @@ impl PhysHost {
             };
             vm.set_prop(controller, "MoveTimer", Value::Float(t));
             t < 0.0
+        } else if !on_ladder && !crate::navfix::disabled() {
+            // UE2 APawn::setMoveTimer at the start of MoveTo/MoveToward: 0.5 + Extra * distance /
+            // (DesiredSpeed * MaxSpeed), Extra = 2 or 1/WalkingPct (1/CrouchedPct) when slowed.
+            // The move ends once the controller's MoveTimer runs out (execPollMoveTo), so a pawn
+            // whose goal spot is taken (queues, crowds) gives up and lets script re-plan.
+            let t = if l.elapsed <= dt {
+                let pf = |k: &str, d: f32| vm.get_prop(pawn, k).map(|v| v.as_float()).unwrap_or(d);
+                let pb = |k: &str| vm.get_prop(pawn, k).is_some_and(|v| v.as_bool());
+                let mut extra: f32 = 2.0;
+                if pb("bIsCrouched") {
+                    extra = extra.max(1.0 / pf("CrouchedPct", 0.5).max(0.05));
+                } else if pb("bIsWalking") {
+                    extra = extra.max(1.0 / pf("WalkingPct", 0.5).max(0.05));
+                }
+                let speed = pf("DesiredSpeed", 1.0).max(0.05) * pf("GroundSpeed", 440.0).max(1.0);
+                0.5 + extra * d.length() / speed - dt
+            } else {
+                vm.get_prop(controller, "MoveTimer").map(|v| v.as_float()).unwrap_or(0.0) - dt
+            };
+            vm.set_prop(controller, "MoveTimer", Value::Float(t));
+            // Never below the old fixed floor for short hops (stairs, doors).
+            t < 0.0 && l.elapsed > 2.0
         } else {
             false
         };
@@ -769,6 +794,7 @@ pub fn install(host: &GameHost, vm: &mut Vm) -> Option<Rc<PhysHost>> {
         }
     };
     let mut bridge = VmBridge::new();
+    let mut baked_exports = std::collections::HashMap::new();
     for (export, id) in &m.by_export {
         if let Some(&o) = objects.get(&(*export as usize)) {
             bridge.bind(&mut m.world, o, *id);
@@ -783,6 +809,9 @@ pub fn install(host: &GameHost, vm: &mut Vm) -> Option<Rc<PhysHost>> {
         // Static ones stay "world" (script treats them like the level anyway).
         if !pb(vm, o, "bStatic") && vm.get_prop(o, "StaticMesh").is_some_and(|v| v.as_resource().is_some()) {
             bridge.level_actors.insert(export as u32, o);
+        }
+        if vm.get_prop(o, "StaticMesh").is_some_and(|v| v.as_resource().is_some()) {
+            baked_exports.insert(o, export as u32);
         }
     }
     let mut registered = 0;
@@ -815,7 +844,7 @@ pub fn install(host: &GameHost, vm: &mut Vm) -> Option<Rc<PhysHost>> {
         m.world.level.triangle_count(),
         t0.elapsed().as_millis()
     );
-    let ph = Rc::new(PhysHost { world: RefCell::new(m.world), bridge: RefCell::new(bridge), seen: RefCell::new(HashSet::new()), scanned: Cell::new(vm.actors.len()), frames: Cell::new(0), timings: Cell::new([0.0; 4]), pull_relinks: Cell::new(0), pending: Cell::new(pending), lib: host.lib.clone(), trace_meshes: RefCell::new(trace_meshes), mesh_actors: RefCell::new(mesh_actors), nav: RefCell::new(Default::default()) });
+    let ph = Rc::new(PhysHost { world: RefCell::new(m.world), bridge: RefCell::new(bridge), seen: RefCell::new(HashSet::new()), scanned: Cell::new(vm.actors.len()), frames: Cell::new(0), timings: Cell::new([0.0; 4]), pull_relinks: Cell::new(0), pending: Cell::new(pending), lib: host.lib.clone(), trace_meshes: RefCell::new(trace_meshes), mesh_actors: RefCell::new(mesh_actors), nav: RefCell::new(Default::default()), baked_exports: RefCell::new(baked_exports) });
     crate::navfix::install(vm);
     let old = host.world.borrow_mut().replace(ph.clone());
     // Also an extension host for natives (HurtRadiusEX, Karma). Drop the previous level's.
@@ -841,6 +870,9 @@ impl Host for PhysHost {
 
     fn actor_destroyed(&self, _vm: &mut Vm, actor: ObjId) {
         self.mesh_actors.borrow_mut().remove(&actor);
+        if let Some(e) = self.baked_exports.borrow_mut().remove(&actor) {
+            self.world.borrow().level.remove_actor(e);
+        }
         let mut w = self.world.borrow_mut();
         self.bridge.borrow_mut().remove_actor(&mut w, actor);
     }

@@ -58,12 +58,12 @@ fn pose(vm: &uscript::vm::Vm, a: ObjId) -> Pose {
 /// Property slots read by [`pose`], resolved once per actor (an object's class never changes)
 /// instead of hashing four property names per actor every frame.
 #[derive(Clone, Copy)]
-struct PoseSlots([Option<usize>; 4]);
+struct PoseSlots([Option<usize>; 6]);
 
 impl PoseSlots {
     fn of(vm: &uscript::vm::Vm, a: ObjId) -> Self {
         let c = &vm.classes[vm.objects[a].class];
-        PoseSlots(["DrawScale", "DrawScale3D", "Location", "Rotation"].map(|n| c.slot(n)))
+        PoseSlots(["DrawScale", "DrawScale3D", "Location", "Rotation", "bHidden", "AttachmentBone"].map(|n| c.slot(n)))
     }
 }
 
@@ -79,7 +79,19 @@ fn pose_with(vm: &uscript::vm::Vm, a: ObjId, sl: &PoseSlots) -> Pose {
         loc: get(2).map(|v| v.as_vec()).unwrap_or_default(),
         rot: get(3).map(|v| v.as_rot()).unwrap_or_default(),
         scale: [s * s3[0], s * s3[1], s * s3[2]],
-        hidden: p2game::ai::render_hidden(vm, a),
+        hidden: {
+            // `ai::render_hidden` with the actor's own step read through cached slots (this runs
+            // for every level static mesh actor every frame): hidden if bHidden; only an actor on
+            // a bone of its Base needs the Base-chain walk.
+            let on_bone = matches!(get(5), Some(Value::Name(n)) if !n.is_empty() && !n.eq_ignore_ascii_case("None"));
+            if get(4).is_some_and(|v| v.as_bool()) {
+                true
+            } else if on_bone {
+                p2game::ai::render_hidden(vm, a)
+            } else {
+                false
+            }
+        },
     }
 }
 
@@ -157,6 +169,8 @@ struct Frames {
     smooth_travel: u32,
     /// Travels requested by `--travel-after`.
     travels: u32,
+    /// Frame times (ms) since the last report, for the percentile/hitch line.
+    dts: Vec<f32>,
 }
 
 pub fn run(cfg: BootConfig, args: Args) {
@@ -728,6 +742,9 @@ fn report(
     let std_mats = &materials;
     let now = time.elapsed_secs_f64();
     fr.wall_frames += 1;
+    if fr.interactive {
+        fr.dts.push(time.delta_secs() * 1000.0);
+    }
     // Load time: the first of 10 consecutive frames under 50 ms after the scene exists counts as
     // the first interactive frame (GPU uploads and pipeline compiles stall the frames before it).
     if !fr.interactive && sim.frames > 0 {
@@ -818,6 +835,14 @@ fn report(
             1000.0 / frame_ms.max(0.001),
             frame_ms - game_ms - sys_ms
         );
+        // Frame-time distribution since the last report (smoothness / hitches).
+        if !fr.dts.is_empty() {
+            let mut d = std::mem::take(&mut fr.dts);
+            d.sort_by(f32::total_cmp);
+            let pct = |p: f32| d[((d.len() - 1) as f32 * p).round() as usize];
+            let over = |ms: f32| d.iter().filter(|&&x| x > ms).count();
+            println!("frametimes: n {} p50 {:.1} p95 {:.1} p99 {:.1} max {:.1} ms, over 25 ms {} over 33 ms {} over 50 ms {}", d.len(), pct(0.5), pct(0.95), pct(0.99), d[d.len() - 1], over(25.0), over(33.3), over(50.0));
+        }
     }
 }
 
