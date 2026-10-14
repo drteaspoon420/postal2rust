@@ -64,6 +64,7 @@ fn normalise(p: &Path) -> Option<PathBuf> {
         return Some(p.to_path_buf());
     }
     if p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("System")) {
+        // Picked the System folder itself.
         if let Some(parent) = p.parent().filter(|q| p2game::is_install(q)) {
             return Some(parent.to_path_buf());
         }
@@ -109,7 +110,7 @@ fn ask(start: Option<PathBuf>) -> Option<PathBuf> {
             println!("POSTAL 2 folder saved to {}", saved_file().display());
             return Some(root);
         }
-        if !message(&format!("This folder is not a POSTAL 2 install:\n\n{picked}\n\nIt must contain System\\Postal2.ini. Click OK to pick again."), true) {
+        if !message(&format!("This folder is not a POSTAL 2 install:\n\n{picked}\n\nIt must contain System/Postal2.ini. Click OK to pick again."), true) {
             return None;
         }
         at = picked;
@@ -123,8 +124,7 @@ pub fn message(text: &str, ok_cancel: bool) -> bool {
     }
     #[cfg(not(windows))]
     {
-        eprintln!("{text}");
-        !ok_cancel
+        unix::message(TITLE, text, ok_cancel)
     }
 }
 
@@ -135,8 +135,92 @@ fn pick_folder(at: &str) -> Option<String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = at;
-        None
+        unix::pick_folder("Select your POSTAL 2 install folder (it contains System, Maps and Textures).", at)
+    }
+}
+
+#[cfg(not(windows))]
+mod unix {
+    //! Dialogs without extra dependencies: AppleScript (`osascript`) on macOS, `zenity` or
+    //! `kdialog` on Linux desktops, else a prompt in the terminal.
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+
+    /// Runs a dialog tool: Some(stdout, ok) when the tool exists, None when it is missing.
+    fn run(tool: &str, args: &[&str]) -> Option<(String, bool)> {
+        let out = Command::new(tool).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        Some((String::from_utf8_lossy(&out.stdout).trim_end_matches(['\n', '\r']).to_string(), out.status.success()))
+    }
+
+    fn applescript_str(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    fn terminal_line(prompt: &str) -> Option<String> {
+        eprint!("{prompt}");
+        let _ = std::io::stderr().flush();
+        let mut s = String::new();
+        match std::io::stdin().lock().read_line(&mut s) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(s.trim().to_string()),
+        }
+    }
+
+    /// OK / OK+Cancel message; true when OK was chosen.
+    pub fn message(title: &str, text: &str, ok_cancel: bool) -> bool {
+        if cfg!(target_os = "macos") {
+            let buttons = if ok_cancel { "{\"Cancel\", \"OK\"}" } else { "{\"OK\"}" };
+            let script = format!("display dialog {} with title {} buttons {buttons} default button \"OK\"", applescript_str(text), applescript_str(title));
+            if let Some((_, ok)) = run("osascript", &["-e", &script]) {
+                return ok;
+            }
+        } else if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let kind = if ok_cancel { "--question" } else { "--info" };
+            if let Some((_, ok)) = run("zenity", &[kind, "--title", title, "--text", text, "--no-wrap"]) {
+                return ok;
+            }
+            let kind = if ok_cancel { "--yesno" } else { "--msgbox" };
+            if let Some((_, ok)) = run("kdialog", &["--title", title, kind, text]) {
+                return ok;
+            }
+        }
+        eprintln!("\n{text}");
+        if !ok_cancel {
+            return true;
+        }
+        terminal_line("Press Enter to continue (or type q and Enter to cancel): ").is_some_and(|l| !l.eq_ignore_ascii_case("q"))
+    }
+
+    /// Folder chooser starting at `start`; None when cancelled.
+    pub fn pick_folder(prompt: &str, start: &str) -> Option<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let start = if start.is_empty() || !std::path::Path::new(start).is_dir() { home.as_str() } else { start };
+        if cfg!(target_os = "macos") {
+            let script = format!("POSIX path of (choose folder with prompt {} default location (POSIX file {}))", applescript_str(prompt), applescript_str(start));
+            if let Some((out, ok)) = run("osascript", &["-e", &script]) {
+                return ok.then(|| out.trim_end_matches('/').to_string()).filter(|s| !s.is_empty());
+            }
+        } else if std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let start_dir = format!("{}/", start.trim_end_matches('/'));
+            if let Some((out, ok)) = run("zenity", &["--file-selection", "--directory", "--title", prompt, "--filename", &start_dir]) {
+                return ok.then_some(out).filter(|s| !s.is_empty());
+            }
+            if let Some((out, ok)) = run("kdialog", &["--title", prompt, "--getexistingdirectory", start]) {
+                return ok.then_some(out).filter(|s| !s.is_empty());
+            }
+        }
+        eprintln!("\n{prompt}");
+        if !start.is_empty() {
+            eprintln!("(Enter on an empty line to use {start})");
+        }
+        let line = terminal_line("POSTAL 2 folder: ")?;
+        let line = line.trim_matches(['"', '\'']).to_string();
+        let line = if line.is_empty() { start.to_string() } else { line };
+        let line = match line.strip_prefix("~/") {
+            Some(rest) if !home.is_empty() => format!("{home}/{rest}"),
+            _ => line,
+        };
+        Some(line).filter(|s| !s.is_empty())
     }
 }
 

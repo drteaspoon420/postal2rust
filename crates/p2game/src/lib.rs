@@ -46,8 +46,8 @@ pub fn game_root(arg: Option<&str>) -> PathBuf {
 
 /// A POSTAL 2 install folder: one with `System\Postal2.ini` (or `System\Default.ini`).
 pub fn is_install(p: &std::path::Path) -> bool {
-    let s = p.join("System");
-    s.join("Postal2.ini").is_file() || s.join("Default.ini").is_file() && s.join("Engine.u").is_file()
+    let s = upkg::ci::join(p, "System");
+    upkg::ci::join(&s, "Postal2.ini").is_file() || upkg::ci::join(&s, "Default.ini").is_file() && upkg::ci::join(&s, "Engine.u").is_file()
 }
 
 pub fn find_install() -> Option<PathBuf> {
@@ -67,19 +67,34 @@ pub fn find_install() -> Option<PathBuf> {
     }
     // Steam libraries.
     let mut steam_roots: Vec<PathBuf> = Vec::new();
-    if let Ok(out) = std::process::Command::new("reg").args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"]).output() {
-        let text = String::from_utf8_lossy(&out.stdout);
-        if let Some(v) = text.lines().find(|l| l.contains("SteamPath")).and_then(|l| l.split("REG_SZ").nth(1)) {
-            steam_roots.push(PathBuf::from(v.trim().replace('/', "\\")));
+    #[cfg(windows)]
+    {
+        if let Ok(out) = std::process::Command::new("reg").args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(v) = text.lines().find(|l| l.contains("SteamPath")).and_then(|l| l.split("REG_SZ").nth(1)) {
+                steam_roots.push(PathBuf::from(v.trim().replace('/', "\\")));
+            }
+        }
+        for p in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
+            steam_roots.push(PathBuf::from(p));
         }
     }
-    for p in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"] {
-        steam_roots.push(PathBuf::from(p));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    #[cfg(target_os = "macos")]
+    if let Some(h) = &home {
+        steam_roots.push(h.join("Library/Application Support/Steam"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(h) = &home {
+        // Native Steam, the ~/.steam symlinks, and the Flatpak / Snap packages.
+        for rel in [".local/share/Steam", ".steam/steam", ".steam/root", ".var/app/com.valvesoftware.Steam/.local/share/Steam", "snap/steam/common/.local/share/Steam"] {
+            steam_roots.push(h.join(rel));
+        }
     }
     let mut libs: Vec<PathBuf> = Vec::new();
     for root in &steam_roots {
         libs.push(root.clone());
-        if let Ok(vdf) = std::fs::read_to_string(root.join("steamapps").join("libraryfolders.vdf")) {
+        if let Ok(vdf) = std::fs::read_to_string(upkg::ci::join(root, "steamapps/libraryfolders.vdf")) {
             for line in vdf.lines() {
                 let l = line.trim();
                 if let Some(rest) = l.strip_prefix("\"path\"") {
@@ -90,16 +105,28 @@ pub fn find_install() -> Option<PathBuf> {
         }
     }
     for drive in 'C'..='Z' {
-        libs.push(PathBuf::from(format!(r"{drive}:\SteamLibrary")));
+        if cfg!(windows) {
+            libs.push(PathBuf::from(format!(r"{drive}:\SteamLibrary")));
+        }
     }
     for lib in libs {
-        let common = lib.join("steamapps").join("common");
+        let common = upkg::ci::join(lib, "steamapps/common");
         for name in ["POSTAL2Complete", "POSTAL 2", "Postal 2", "POSTAL2"] {
             cands.push(common.join(name));
         }
     }
+    #[cfg(windows)]
     for p in [r"C:\GOG Games\POSTAL 2", r"C:\Program Files (x86)\GOG Galaxy\Games\POSTAL 2", r"C:\Program Files (x86)\Running With Scissors\POSTAL 2"] {
         cands.push(PathBuf::from(p));
     }
+    // GOG installs via Heroic / Lutris / a manual copy.
+    #[cfg(unix)]
+    if let Some(h) = &home {
+        for rel in ["Games/Heroic/POSTAL 2", "Games/POSTAL 2", "Games/postal-2", "GOG Games/POSTAL 2", "Applications/POSTAL 2"] {
+            cands.push(h.join(rel));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = home;
     cands.into_iter().find(|c| is_install(c))
 }

@@ -113,7 +113,7 @@ impl ScriptDefaults {
     pub fn new(game_dir: &Path) -> ScriptDefaults {
         #[cfg(feature = "script-defaults")]
         {
-            let vm = uscript::vm::Vm::new(game_dir.join("System")).ok();
+            let vm = uscript::vm::Vm::new(upkg::ci::join(game_dir, "System")).ok();
             ScriptDefaults { vm, class_ids: HashMap::new(), is_a_cache: HashMap::new(), cache: HashMap::new() }
         }
         #[cfg(not(feature = "script-defaults"))]

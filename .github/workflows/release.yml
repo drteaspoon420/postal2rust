@@ -1,0 +1,154 @@
+name: release
+
+# Builds Postal2Rust for Windows, Linux and macOS.
+# * Tag push v*: optimized `dist` builds, attached to a GitHub Release for the tag.
+# * workflow_dispatch: pick the profile; optionally publish to a release for an existing tag.
+# * Push to a ci/** branch: quick `release` builds, artifacts only (no release).
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["ci/**"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Cargo profile (dist = fat LTO, slow; release = faster CI)"
+        type: choice
+        options: [dist, release]
+        default: dist
+      release_tag:
+        description: "Attach the builds to the release of this existing tag (empty: artifacts only)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || (startsWith(github.ref, 'refs/tags/v') && 'dist' || 'release') }}
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-${{ env.PROFILE }}
+      - name: Build
+        shell: pwsh
+        run: |
+          # llvm-windres (from the preinstalled LLVM) embeds the app icon; without it the exe has none.
+          $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+          cargo build --locked --profile $env:PROFILE -p p2game --bin p2game --target x86_64-pc-windows-msvc
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "Postal2Rust-windows-x86_64"
+          New-Item -ItemType Directory -Force $name | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/$env:PROFILE/p2game.exe" "$name/Postal2Rust.exe"
+          Copy-Item tools/release/README-windows.txt "$name/README.txt"
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: Postal2Rust-windows-x86_64.zip
+          if-no-files-found: error
+
+  linux:
+    # Oldest supported runner: the binary then runs on glibc 2.35+ distributions.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-${{ env.PROFILE }}
+      - name: Build
+        run: cargo build --locked --profile "$PROFILE" -p p2game --bin p2game
+      - name: Unit test (case-insensitive file lookup)
+        run: cargo test --locked -p upkg --lib ci::
+      - name: Package
+        run: |
+          name=Postal2Rust-linux-x86_64
+          mkdir -p "$name"
+          cp "target/$PROFILE/p2game" "$name/Postal2Rust"
+          strip "$name/Postal2Rust" || true
+          chmod +x "$name/Postal2Rust"
+          cp tools/release/README-linux.txt "$name/README.txt"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: Postal2Rust-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-${{ env.PROFILE }}
+      - name: Build (Apple Silicon)
+        run: cargo build --locked --profile "$PROFILE" -p p2game --bin p2game --target aarch64-apple-darwin
+      - name: Build (Intel)
+        run: cargo build --locked --profile "$PROFILE" -p p2game --bin p2game --target x86_64-apple-darwin
+      - name: Unit test (case-insensitive file lookup)
+        run: cargo test --locked -p upkg --lib ci::
+      - name: Package (universal binary)
+        run: |
+          name=Postal2Rust-macos-universal
+          mkdir -p "$name"
+          lipo -create -output "$name/Postal2Rust" \
+            "target/aarch64-apple-darwin/$PROFILE/p2game" \
+            "target/x86_64-apple-darwin/$PROFILE/p2game"
+          strip -x "$name/Postal2Rust" || true
+          # Ad-hoc signature: required for arm64 binaries after lipo/strip.
+          codesign --force --sign - "$name/Postal2Rust"
+          chmod +x "$name/Postal2Rust"
+          lipo -info "$name/Postal2Rust"
+          cp tools/release/README-macos.txt "$name/README.txt"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: Postal2Rust-macos-universal.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, linux, macos]
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
+          files: |
+            dist/Postal2Rust-windows-x86_64.zip
+            dist/Postal2Rust-linux-x86_64.tar.gz
+            dist/Postal2Rust-macos-universal.tar.gz
+          fail_on_unmatched_files: true

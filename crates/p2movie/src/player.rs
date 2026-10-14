@@ -59,7 +59,7 @@ pub fn find_movie(game: &Path, name: &str) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p.to_path_buf());
     }
-    let dir = game.join("Movies");
+    let dir = upkg::ci::join(game, "Movies");
     let want = Path::new(name).file_name()?.to_string_lossy().to_ascii_lowercase();
     let want_ext = if Path::new(&want).extension().is_none() { format!("{want}.roq") } else { want.clone() };
     std::fs::read_dir(&dir).ok()?.flatten().map(|e| e.path()).find(|f| f.file_name().is_some_and(|n| {

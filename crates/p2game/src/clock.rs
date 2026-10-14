@@ -49,7 +49,34 @@ pub fn now() -> Clock {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+pub fn now() -> Clock {
+    // libc `localtime_r` (std links libc already). `struct tm` starts with nine ints (sec, min,
+    // hour, mday, mon, year, wday, yday, isdst) on glibc, musl and macOS; the buffer is larger
+    // than any `struct tm`.
+    unsafe extern "C" {
+        fn localtime_r(t: *const i64, out: *mut [i32; 16]) -> *mut [i32; 16];
+    }
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = d.as_secs() as i64;
+    let mut tm = [0i32; 16];
+    // SAFETY: time_t is 64-bit on every supported unix target; tm is a large enough buffer.
+    if unsafe { localtime_r(&secs, &mut tm) }.is_null() {
+        return from_unix(secs, d.subsec_millis() as i32);
+    }
+    Clock {
+        year: tm[5] + 1900,
+        month: tm[4] + 1,
+        day: tm[3],
+        day_of_week: tm[6],
+        hour: tm[2],
+        minute: tm[1],
+        second: tm[0].min(59),
+        millisecond: d.subsec_millis() as i32,
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn now() -> Clock {
     // UTC: no time zone database here.
     let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();

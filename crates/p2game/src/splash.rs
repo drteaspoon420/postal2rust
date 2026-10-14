@@ -208,7 +208,7 @@ pub fn show(system_dir: &Path) {
     if AUTOMATED.iter().any(|k| std::env::var_os(k).is_some()) {
         return;
     }
-    let Ok(b) = std::fs::read(system_dir.join("Postal2Splash.bmp")) else { return };
+    let Ok(b) = std::fs::read(upkg::ci::join(system_dir, "Postal2Splash.bmp")) else { return };
     let Some(img) = decode_bmp(&b) else { return };
     #[cfg(windows)]
     imp::show(img);

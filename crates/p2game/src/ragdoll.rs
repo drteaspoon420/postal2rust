@@ -72,7 +72,7 @@ pub fn install(game_dir: PathBuf) -> Option<Rc<Ragdolls>> {
     if std::env::var_os("P2GAME_NO_RAGDOLL").is_some() {
         return None;
     }
-    let assets = load_karma_dir(&game_dir.join("KarmaData")).into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
+    let assets = load_karma_dir(&upkg::ci::join(&game_dir, "KarmaData")).into_iter().map(|(k, v)| (k, Arc::new(v))).collect();
     let r = Rc::new(Ragdolls { assets, live: RefCell::new(HashMap::new()), pending: RefCell::new(HashMap::new()), stats: RefCell::new(RagdollStats::default()), viewport_checked: std::cell::Cell::new(false) });
     RAGDOLLS.with(|s| *s.borrow_mut() = Some(r.clone()));
     crate::host::register_level_hook(level_hook);

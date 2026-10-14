@@ -43,15 +43,15 @@ pub struct BootConfig {
 }
 
 fn pick(system: &Path, primary: &str, fallback: &str) -> PathBuf {
-    let p = system.join(primary);
-    if p.is_file() { p } else { system.join(fallback) }
+    let p = upkg::ci::join(system, primary);
+    if p.is_file() { p } else { upkg::ci::join(system, fallback) }
 }
 
 impl BootConfig {
     pub fn load(system_dir: &Path) -> std::io::Result<Self> {
         // The engine names its main ini after the executable; read the shipped default first to
         // learn the executable name, then prefer the live file.
-        let exe = Ini::load(system_dir.join("Default.ini"))
+        let exe = Ini::load(upkg::ci::join(system_dir, "Default.ini"))
             .ok()
             .and_then(|i| i.get("URL", "EXEName").map(|s| s.to_string()))
             .unwrap_or_else(|| "Postal2.exe".into());
@@ -198,7 +198,7 @@ impl uscript::config::ConfigSource for IniConfig {
             return indexed(&self.user, section, key);
         }
         let mut others = self.others.borrow_mut();
-        let ini = others.entry(f).or_insert_with(|| Ini::load(self.system_dir.join(file)).ok());
+        let ini = others.entry(f).or_insert_with(|| Ini::load(upkg::ci::join(&self.system_dir, file)).ok());
         ini.as_ref().map(|i| indexed(i, section, key)).unwrap_or_default()
     }
 }

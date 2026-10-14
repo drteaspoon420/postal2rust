@@ -3,6 +3,7 @@
 //! Written from observation of the on-disk data; contains no code from the original game.
 //! Game data is never bundled: callers point this crate at the user's own installation.
 
+pub mod ci;
 pub mod font;
 pub mod emitter;
 pub mod library;

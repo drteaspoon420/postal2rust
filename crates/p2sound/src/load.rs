@@ -113,9 +113,9 @@ impl SoundCache {
 
     /// Decodes a loose music file (Ogg Vorbis or WAV) by name, searching `Music\`.
     pub fn music(&mut self, game: &Path, song: &str) -> Option<Arc<SoundData>> {
-        let mut cands = vec![PathBuf::from(song), game.join("Music").join(song)];
+        let mut cands = vec![PathBuf::from(song), upkg::ci::join(game, Path::new("Music").join(song))];
         if Path::new(song).extension().is_none() {
-            cands.push(game.join("Music").join(format!("{song}.ogg")));
+            cands.push(upkg::ci::join(game, Path::new("Music").join(format!("{song}.ogg"))));
         }
         let path = cands.into_iter().find(|p| p.is_file())?;
         if let Some(s) = self.music.get(&path) {

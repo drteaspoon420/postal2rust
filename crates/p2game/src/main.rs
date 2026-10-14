@@ -106,10 +106,11 @@ fn main() {
         options: flag(&a, "--options").unwrap_or_default(),
         verbose: has(&a, "-v") || has(&a, "--verbose"),
     };
-    let system = args.root.join("System");
-    if !system.join("Postal2.ini").is_file() && !system.join("Default.ini").is_file() {
+    let system = upkg::ci::join(&args.root, "System");
+    if !upkg::ci::join(&system, "Postal2.ini").is_file() && !upkg::ci::join(&system, "Default.ini").is_file() {
+        let example = if cfg!(windows) { r#"p2game.exe --game "C:\path\to\POSTAL2Complete""# } else { r#"./Postal2Rust --game "$HOME/.local/share/Steam/steamapps/common/POSTAL2Complete""# };
         let msg = format!(
-            "POSTAL 2 was not found.\n\nThis engine needs your own installed copy of POSTAL 2 (e.g. Steam \"POSTAL 2\" / POSTAL2Complete).\n\nLooked in: {}\n\nFix: put the install folder path on one line in postal2dir.txt next to p2game.exe, or run\n  p2game.exe --game \"C:\\path\\to\\POSTAL2Complete\"",
+            "POSTAL 2 was not found.\n\nThis engine needs your own installed copy of POSTAL 2 (e.g. Steam \"POSTAL 2\" / POSTAL2Complete).\n\nLooked in: {}\n\nFix: put the install folder path on one line in postal2dir.txt next to the game executable, or run\n  {example}",
             args.root.display()
         );
         eprintln!("{msg}");
@@ -232,7 +233,7 @@ pub fn open_map(world: &World, name: &str) -> Option<Arc<Package>> {
 #[cfg(feature = "window")]
 pub(crate) fn map_list() -> Vec<String> {
     let root = p2game::game_root(None);
-    let Ok(cfg) = BootConfig::load(&root.join("System")) else { return Vec::new() };
+    let Ok(cfg) = BootConfig::load(&upkg::ci::join(root, "System")) else { return Vec::new() };
     let ext = cfg.map_ext.to_ascii_lowercase();
     let files = p2game::pkgindex::PackageFiles::new(&cfg.system_dir, &cfg.paths);
     let mut v: Vec<String> = files

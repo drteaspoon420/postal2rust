@@ -149,7 +149,7 @@ impl PackageFiles {
             let p = p.replace('\\', "/");
             let (dir, pat) = p.rsplit_once('/').unwrap_or((".", p.as_str()));
             let ext = pat.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-            let Ok(rd) = std::fs::read_dir(system_dir.join(dir)) else { continue };
+            let Ok(rd) = std::fs::read_dir(upkg::ci::join(system_dir, dir)) else { continue };
             for e in rd.flatten() {
                 let path = e.path();
                 let pe = path.extension().map(|s| s.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();

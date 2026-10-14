@@ -524,8 +524,8 @@ fn register_core_more(vm: &mut Vm) {
         "GetBuildDate" => |_, _| Ok(Value::Str(concat!("postal2rust ", env!("CARGO_PKG_VERSION")).into())),
         "GetCountryCode" => |_, _| Ok(Value::Str("int".into())),
         // File access is read-only and relative to the System directory.
-        "FileSize" => |vm, a| Ok(Value::Int(std::fs::metadata(vm.system_dir.join(s(a, 0))).map(|m| m.len().min(i32::MAX as u64) as i32).unwrap_or(-1))),
-        "LoadFileToString" => |vm, a| match std::fs::read(vm.system_dir.join(s(a, 1))) {
+        "FileSize" => |vm, a| Ok(Value::Int(std::fs::metadata(upkg::ci::join(&vm.system_dir, s(a, 0))).map(|m| m.len().min(i32::MAX as u64) as i32).unwrap_or(-1))),
+        "LoadFileToString" => |vm, a| match std::fs::read(upkg::ci::join(&vm.system_dir, s(a, 1))) {
             Ok(b) => { a[0] = Value::Str(String::from_utf8_lossy(&b).into_owned()); Ok(Value::Bool(true)) }
             Err(_) => Ok(Value::Bool(false)),
         },
@@ -533,8 +533,8 @@ fn register_core_more(vm: &mut Vm) {
         "FindFiles" => |vm, a| {
             let pat = s(a, 0);
             let (want_files, want_dirs) = (b(a, 1), b(a, 2));
-            let path = vm.system_dir.join(&pat);
-            let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+            let path = vm.system_dir.join(pat.replace('\\', "/"));
+            let dir = path.parent().map(|p| upkg::ci::join(&vm.system_dir, p.strip_prefix(&vm.system_dir).unwrap_or(p))).unwrap_or_default();
             let mask = path.file_name().map(|m| m.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
             let mut out = Vec::new();
             if let Ok(rd) = std::fs::read_dir(&dir) {

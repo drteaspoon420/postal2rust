@@ -54,7 +54,7 @@ impl Library {
         let root = root.as_ref().to_path_buf();
         let mut files = HashMap::new();
         for dir in CONTENT_DIRS {
-            let Ok(rd) = std::fs::read_dir(root.join(dir)) else { continue };
+            let Ok(rd) = std::fs::read_dir(crate::ci::join(&root, dir)) else { continue };
             for e in rd.flatten() {
                 let p = e.path();
                 let ext = p.extension().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();

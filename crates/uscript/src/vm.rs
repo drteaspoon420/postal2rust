@@ -675,7 +675,7 @@ impl Vm {
         if let Some(p) = self.pkg_by_name.get(&key) {
             return *p;
         }
-        let path = self.system_dir.join(format!("{name}.u"));
+        let path = upkg::ci::join(&self.system_dir, format!("{name}.u"));
         let loaded = ScriptPackage::open(&path).ok().map(|sp| {
             let idx = self.pkgs.len();
             for (i, o) in sp.objects.iter().enumerate() {
@@ -2228,7 +2228,7 @@ impl Vm {
     pub fn localize(&mut self, section: &str, key: &str, package: &str) -> String {
         let pk = package.to_ascii_lowercase();
         if !self.localized.contains_key(&pk) {
-            let table = std::fs::read(self.system_dir.join(format!("{package}.int"))).ok().map(|b| parse_ini(&b));
+            let table = std::fs::read(upkg::ci::join(&self.system_dir, format!("{package}.int"))).ok().map(|b| parse_ini(&b));
             self.localized.insert(pk.clone(), table);
         }
         self.localized
