@@ -80,7 +80,7 @@ jobs:
       - name: Build
         run: cargo build --locked --profile "$PROFILE" -p p2game --bin p2game
       - name: Unit test (case-insensitive file lookup)
-        run: cargo test --locked -p upkg --lib ci::
+        run: cargo test --locked -p upkg --lib ci::tests
       - name: Package
         run: |
           name=Postal2Rust-linux-x86_64
@@ -113,7 +113,7 @@ jobs:
       - name: Build (Intel)
         run: cargo build --locked --profile "$PROFILE" -p p2game --bin p2game --target x86_64-apple-darwin
       - name: Unit test (case-insensitive file lookup)
-        run: cargo test --locked -p upkg --lib ci::
+        run: cargo test --locked -p upkg --lib ci::tests
       - name: Package (universal binary)
         run: |
           name=Postal2Rust-macos-universal
