@@ -26,6 +26,7 @@ use upkg::Package;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod launch;
 #[cfg(feature = "window")]
 mod cinema_view;
 #[cfg(feature = "window")]
@@ -83,8 +84,21 @@ fn has(a: &[String], f: &str) -> bool {
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
+    launch::prepare(&a);
+    // The shipped exe asks for the install folder when it cannot find one (or on --change-folder).
+    let root = if launch::shipped() || has(&a, "--change-folder") {
+        match launch::resolve_root(&a, flag(&a, "--game").as_deref()) {
+            Some(r) => r,
+            None => {
+                println!("No POSTAL 2 folder selected.");
+                return;
+            }
+        }
+    } else {
+        game_root(flag(&a, "--game").as_deref())
+    };
     let args = Args {
-        root: game_root(flag(&a, "--game").as_deref()),
+        root,
         map: flag(&a, "--map"),
         frames: flag(&a, "--frames").and_then(|s| s.parse().ok()).unwrap_or(60),
         out: PathBuf::from(flag(&a, "--out").unwrap_or_else(|| "out".into())),
@@ -99,10 +113,14 @@ fn main() {
             args.root.display()
         );
         eprintln!("{msg}");
-        #[cfg(windows)]
-        {
-            let script = format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show(@'\n{msg}\n'@, 'Postal 2 Rust/Bevy') | Out-Null");
-            let _ = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]).status();
+        if launch::shipped() {
+            launch::message(&msg, false);
+        } else {
+            #[cfg(windows)]
+            {
+                let script = format!("Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show(@'\n{msg}\n'@, 'Postal 2 Rust/Bevy') | Out-Null");
+                let _ = std::process::Command::new("powershell").args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script]).status();
+            }
         }
         std::process::exit(2);
     }

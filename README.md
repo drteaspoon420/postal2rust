@@ -13,18 +13,16 @@ A clean-room Rust / [Bevy](https://bevyengine.org) engine that runs **POSTAL 2**
 ## Playing (release build)
 
 1. Download the latest release zip from the [Releases](../../releases) page and unzip it anywhere.
-2. Run **`postal2rust.exe`**.
-3. On first launch it asks for your **POSTAL 2 install folder** (the one containing `System`, `Maps`, `Textures`; on Steam usually `...\steamapps\common\POSTAL2Complete`). If it finds one in your Steam library it opens the picker there. The choice is saved in `postal2dir.txt` next to the exe.
+2. Run **`Postal2Rust.exe`** (one exe: the game itself, with a console window for its messages; if it crashes the console stays open with the error).
+3. If your **POSTAL 2 install folder** is not found automatically (the one containing `System`, `Maps`, `Textures`; on Steam usually `...\steamapps\common\POSTAL2Complete`), it asks for it. The choice is saved in `postal2dir.txt` next to the exe.
 
-Launcher options:
+Options:
 
 | Option | What it does |
 |---|---|
 | `--change-folder` | Ask for the POSTAL 2 folder again |
-| `--windowed` | Play in a window instead of borderless fullscreen |
+| `--windowed` | Play in a window instead of fullscreen |
 | `--map suburbs-1` | Start directly on a map |
-
-The game log is written to `p2game.log` next to the exe.
 
 Requirements: Windows 10/11 64-bit, a GPU with Vulkan or DirectX 12, and a copy of POSTAL 2.
 
@@ -124,10 +122,10 @@ Known differences from the original, roughly by impact:
 Windows, Rust stable with the `x86_64-pc-windows-gnullvm` target and [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (no Visual Studio needed). `tools/cargo.bat` wraps cargo with that toolchain; edit the paths at its top for your machine.
 
 ```
-tools\cargo.bat build --release -p p2game -p postal2rust
+tools\cargo.bat build --release -p p2game
 ```
 
-This gives `target\release\postal2rust.exe` (launcher) and `p2game.exe` (the game). For a shipping build use `--profile dist` instead of `--release` (fat LTO, about 10% faster, slow to build; output in `target\dist`). The game needs `libunwind.dll` from llvm-mingw next to it. You can also run the game directly:
+This gives `target\release\p2game.exe`; the release ships it renamed to `Postal2Rust.exe` (under any name other than `p2game` it defaults to fullscreen and asks for the install folder when needed). The app icon (`crates/p2game/res/app.ico`, original art from `tools/release/make_icon.ps1`) is embedded by `build.rs` with llvm-windres. For a shipping build use `--profile dist` instead of `--release` (fat LTO, about 10% faster, slow to build; output in `target\dist`). The game needs `libunwind.dll` from llvm-mingw next to it. You can also run the game directly:
 
 ```
 target\release\p2game.exe --game "C:\path\to\POSTAL2Complete" --map suburbs-1
@@ -139,10 +137,9 @@ Regression modes used during development: `--smoke` (boots a set of maps) and `-
 
 | Crate | What |
 |---|---|
-| `launcher` | `postal2rust.exe`: finds or asks for the POSTAL 2 install, starts the game |
+| `p2game` | The game (shipped as `Postal2Rust.exe`): install detection and folder prompt, boot, map actors, the VM host, AI movement, weapons, HUD, menus, save/load, windowed play |
 | `upkg` | Unreal Engine 2 package reader: tables, tagged properties, textures, static/skeletal meshes, animations, BSP, lightmaps, terrain, sounds |
 | `uscript` | UnrealScript bytecode interpreter: object graph, states, latent functions, iterators, navigation natives |
-| `p2game` | The game: boot, map actors, the VM host, AI movement, weapons, HUD, menus, save/load, windowed play |
 | `p2view` | Bevy level renderer: BSP with baked lightmaps, static meshes, terrain, sky, projectors |
 | `p2physics` / `p2collide` | UE2 actor physics (walking, falling, swimming, ladders, movers, volumes) and swept collision |
 | `p2anim` | Skeletal animation and GPU skinning |

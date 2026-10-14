@@ -292,7 +292,8 @@ struct LevelSnapshot {
 }
 
 /// Marks the entities spawned by the last level load (one frame later, once commands applied).
-fn tag_level_entities(mut commands: Commands, mut snap: ResMut<LevelSnapshot>, all: Query<Entity, Without<LevelEntity>>) {
+// Resources are entities in Bevy 0.19: ones created by a level load (GlobalAmbientLight from spawn_lights) must not be tagged, or the next travel despawns them and Bevy panics.
+fn tag_level_entities(mut commands: Commands, mut snap: ResMut<LevelSnapshot>, all: Query<Entity, (Without<LevelEntity>, Without<bevy::ecs::resource::IsResource>)>) {
     let Some(before) = snap.before.take() else { return };
     for e in &all {
         if !before.contains(&e) {
