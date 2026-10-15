@@ -57,6 +57,7 @@ jobs:
           New-Item -ItemType Directory -Force $name | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/$env:PROFILE/p2game.exe" "$name/Postal2Rust.exe"
           Copy-Item tools/release/README-windows.txt "$name/README.txt"
+          Copy-Item tools/release/postal2-dir.bat "$name/postal2-dir.bat"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - uses: actions/upload-artifact@v4
         with:

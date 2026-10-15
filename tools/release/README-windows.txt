@@ -12,6 +12,7 @@ How to play
 3. If your POSTAL 2 install is not found automatically, it asks for the folder (the one
    containing System, Maps, Textures; on Steam: ...\steamapps\common\POSTAL2Complete).
    The choice is remembered in postal2dir.txt.
+4. To use a different POSTAL 2 folder later, double-click postal2-dir.bat.
 
 Options (from a command prompt in this folder):
   Postal2Rust.exe --change-folder     ask for the POSTAL 2 folder again
