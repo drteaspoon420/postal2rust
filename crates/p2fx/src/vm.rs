@@ -252,7 +252,7 @@ impl FxWorld {
         self.next_id += 1;
         let state = SystemState::new(&defs, &settings, 0x5eed_0000 ^ id.wrapping_mul(0x9e37_79b9_7f4a_7c15));
         let seen = defs.iter().map(mirror_of).collect();
-        let hidden = b_of(vm.get_prop(a, "bHidden"));
+        let hidden = render_hidden(vm, a);
         // Muzzle flashes attach to the first-person weapon (Base = a Weapon whose Instigator is
         // the local player's pawn).
         let first_person = vm.get_prop(a, "Base").and_then(|v| v.as_obj()).is_some_and(|b| vm.class_is_a(vm.objects[b].class, "Weapon"));
@@ -586,6 +586,26 @@ pub fn thick_line_cylinder(a: Vec3, b: Vec3, lr: f32, lh: f32, p: Vec3, r: f32, 
     (p2 - q).length() <= r + lr && (z - p.z).abs() < h + lh
 }
 
+/// True if the emitter actor should not draw: its own `bHidden`, or it rides a bone of an actor
+/// that does not draw (UE2 renders bone attachments with their base's mesh). Cigarette smoke is
+/// attached to a BoltonPart on a smoker's finger; when the smoker goes into slider stasis
+/// (LambController.GoIntoSliderStasis: bHidden, out of play) the body, head and cigarette vanish,
+/// and so must the smoke, otherwise a lone puff hangs in the air where nobody stands.
+pub fn render_hidden(vm: &Vm, a: ObjId) -> bool {
+    let mut cur = a;
+    for _ in 0..8 {
+        if vm.objects.get(cur).is_none_or(|o| o.deleted) || b_of(vm.get_prop(cur, "bHidden")) {
+            return true;
+        }
+        let on_bone = matches!(vm.get_prop(cur, "AttachmentBone"), Some(Value::Name(n)) if !n.is_empty() && !n.eq_ignore_ascii_case("None"));
+        match vm.get_prop(cur, "Base").and_then(|v| v.as_obj()) {
+            Some(b) if on_bone && b != cur => cur = b,
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn mirror_of(d: &ParticleEmitter) -> Mirror {
     Mirror {
         disabled: d.disabled,
@@ -752,7 +772,7 @@ impl VmFx {
             self.settings.auto_destroy = true;
             self.state.auto_destroy = true;
         }
-        self.hidden = b_of(vm.get_prop(self.actor, "bHidden"));
+        self.hidden = render_hidden(vm, self.actor);
     }
 
     /// Writes runtime values scripts read back (ActiveParticles, LineStart/LineEnd).
