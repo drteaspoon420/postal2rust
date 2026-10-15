@@ -19,7 +19,7 @@
 //!
 //! `P2GAME_NO_RAGDOLL=1` disables the subsystem.
 
-use crate::host::{GameHost, actor_world};
+use crate::host::{GameHost, actor_world, skel_actor_world};
 use glam::{Mat4, Vec3};
 use p2anim::ragdoll::{KaAsset, Ragdoll, RagdollWorld, load_karma_dir};
 use p2collide::{Shape, TraceFlags};
@@ -220,7 +220,7 @@ impl Ragdolls {
                 vm.set_prop(a, "Location", Value::Vector(root.to_array()));
                 vm.set_prop(a, "Velocity", Value::Vector([0.0; 3]));
             }
-            let m2w = actor_world(vm, a) * x.inst.skeleton.mesh_xform;
+            let m2w = skel_actor_world(vm, a, x.inst.skeleton.mesh_xform) * x.inst.skeleton.mesh_xform;
             // A settled doll keeps its pose: rebuilding the bone matrices each frame cost
             // ~2 ms on MilitaryBase with nothing moving.
             if l.frozen && l.posed_at == Some(m2w) {
@@ -250,7 +250,7 @@ impl Ragdolls {
         if trace {
             eprintln!("ragdoll: start {} skeleton {skel}", vm.object_name(a));
         }
-        let aw = actor_world(vm, a);
+        let aw = host.anims.borrow().get(&a).map(|x| skel_actor_world(vm, a, x.inst.skeleton.mesh_xform)).unwrap_or_else(|| actor_world(vm, a));
         let vel = Vec3::from(vm.get_prop(a, "Velocity").map(|v| v.as_vec()).unwrap_or_default());
         let mut anims = host.anims.borrow_mut();
         let Some(x) = anims.get_mut(&a) else { return };

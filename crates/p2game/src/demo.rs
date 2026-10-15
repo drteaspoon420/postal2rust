@@ -34,6 +34,65 @@ pub fn install() {
     if std::env::var_os("P2GAME_DEMO_HIT").is_some() {
         crate::host::register_level_hook(hit_hook);
     }
+    if std::env::var_os("P2GAME_DEMO_FACE").is_some() {
+        crate::host::register_level_hook(face_hook);
+    }
+}
+
+/// `P2GAME_DEMO_FACE="Key@T@D[@Yaw]"`: from T on, every frame puts the player pawn D units in
+/// front of the face of the pawn owning Key (a head or pawn; `bolton=Shades` finds a wearer),
+/// optionally rotated Yaw degrees around it, at head height, and looks at the head: close-ups of
+/// faces, glasses and hats while the NPC goes about its business.
+fn face_hook(host: &GameHost, _vm: &mut Vm) {
+    let spec = std::env::var("P2GAME_DEMO_FACE").unwrap_or_default();
+    let p: Vec<String> = spec.split('@').map(|s| s.trim().to_string()).collect();
+    let (Some(key), Some(at)) = (p.first().cloned(), p.get(1).and_then(|s| when(s))) else { return };
+    let dist: f32 = p.get(2).and_then(|s| s.parse().ok()).unwrap_or(40.0);
+    let yaw_off: f32 = p.get(3).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let t = Rc::new(Cell::new(0.0f32));
+    let frame = Rc::new(Cell::new(0u32));
+    let hp: *const GameHost = host;
+    let mut target: Option<ObjId> = None;
+    host.frame_hooks.borrow_mut().push(Box::new(move |vm, dt| {
+        t.set(t.get() + dt);
+        frame.set(frame.get() + 1);
+        if !due(at, t.get(), frame.get()) {
+            return;
+        }
+        if target.is_none_or(|x| vm.objects[x].deleted) {
+            target = find_actor(vm, &key);
+            println!("demo face {key}: {:?}", target.map(|x| vm.object_name(x)));
+        }
+        let Some(x) = target else { return };
+        let (head, body) = if vm.class_is_a(vm.objects[x].class, "Head") {
+            (x, vm.get_prop(x, "MyBody").or_else(|| vm.get_prop(x, "Base")).and_then(|v| v.as_obj()).unwrap_or(x))
+        } else {
+            (vm.get_prop(x, "MyHead").and_then(|v| v.as_obj()).unwrap_or(x), x)
+        };
+        let pc = crate::ai::local_player_controller(vm);
+        let Some((pc, pawn)) = pc.and_then(|c| Some((c, vm.get_prop(c, "Pawn")?.as_obj()?))) else { return };
+        let yaw = vm.actor_rot(body)[1] as f32 * std::f32::consts::TAU / 65536.0 + yaw_off.to_radians();
+        let h = glam::Vec3::from(vm.actor_loc(head)) + glam::Vec3::Z * 6.0;
+        let eye_h = vm.get_prop(pawn, "EyeHeight").map(|v| v.as_float()).unwrap_or(0.0);
+        let want = h + glam::Vec3::new(yaw.cos(), yaw.sin(), 0.0) * dist - glam::Vec3::Z * eye_h;
+        // SAFETY: the hook is owned by this host's frame_hooks and only runs while it is alive.
+        let host = unsafe { &*hp };
+        // Teleport every frame; when the spot is blocked (the target's own cylinder, a wall),
+        // try a little further out and higher.
+        let ok = (0..6).flat_map(|k| (0..3).map(move |j| (k, j))).any(|(k, j)| {
+            let w = h + glam::Vec3::new(yaw.cos(), yaw.sin(), 0.0) * (dist + 10.0 * k as f32) - glam::Vec3::Z * (eye_h - 8.0 * j as f32);
+            uscript::host::Host::move_actor(host, vm, pawn, w.to_array(), false)
+        });
+        if !ok && frame.get() % 30 == 0 {
+            println!("demo face: no free spot near {want:?}");
+        }
+        vm.set_prop(pawn, "Velocity", Value::Vector([0.0; 3]));
+        let p = glam::Vec3::from(vm.actor_loc(pawn)) + glam::Vec3::Z * eye_h;
+        let d = h - p;
+        let ry = (d.y.atan2(d.x) * 32768.0 / std::f32::consts::PI) as i32;
+        let rp = (d.z.atan2(glam::Vec2::new(d.x, d.y).length()) * 32768.0 / std::f32::consts::PI) as i32;
+        vm.set_prop(pc, "Rotation", Value::Rotator([rp & 0xffff, ry & 0xffff, 0]));
+    }));
 }
 
 /// `P2GAME_DEMO_HIT="Key@T@Damage@Class@DZ[;...]"`: at T seconds the player pawn hits actor Key
@@ -213,6 +272,21 @@ fn look_hook(host: &GameHost, _vm: &mut Vm) {
 /// First live actor whose Tag, object name or class name is `key` (case-insensitive). `+Class`
 /// picks the newest live actor of that class (e.g. `+Bystanders` for the one just summoned).
 pub fn find_actor(vm: &Vm, key: &str) -> Option<ObjId> {
+    // `bolton=Text[#N]`: the Nth (default first) head of a pawn wearing a head bolton whose
+    // StaticMesh path contains Text (`bolton=Shades`, `bolton=Hats#2`), for close-up checks.
+    if let Some(spec) = key.strip_prefix("bolton=").or_else(|| key.strip_prefix("bolton:")) {
+        let (text, n) = spec.split_once('#').map_or((spec, 0), |(t, n)| (t, n.parse().unwrap_or(0)));
+        let text = text.to_ascii_lowercase();
+        return vm
+            .actors
+            .iter()
+            .copied()
+            .filter(|&a| !vm.objects[a].deleted && vm.class_is_a(vm.objects[a].class, "BoltonPart"))
+            .filter(|&a| vm.get_prop(a, "StaticMesh").and_then(|v| v.as_resource().map(str::to_ascii_lowercase)).is_some_and(|s| s.contains(&text)))
+            .filter_map(|a| vm.get_prop(a, "Base").and_then(|v| v.as_obj()))
+            .filter(|&h| vm.class_is_a(vm.objects[h].class, "Head"))
+            .nth(n);
+    }
     // `Key.Prop`: an object property of the found actor (e.g. `+Bystanders.MyHead`).
     if let Some((base, prop)) = key.split_once('.') {
         return find_actor(vm, base).and_then(|a| vm.get_prop(a, prop)).and_then(|v| v.as_obj());

@@ -221,7 +221,52 @@ pub fn actor_world(vm: &Vm, a: ObjId) -> Mat4 {
             loc.z += h0 - h;
         }
     }
-    Mat4::from_translation(loc) * Mat4::from_mat3(rotator_mat3(vm.actor_rot(a))) * Mat4::from_scale(s3 * s)
+    // PrePivot (UE2): a skeletal mesh is drawn at Location + PrePivot (world space, before the
+    // rotation: ULodMeshInstance::MeshToWorld), so bones and bone attachments move with it; a
+    // static mesh (DT_StaticMesh) pivots around PrePivot in its own space (LocalToWorld:
+    // Location + R * S * (v - PrePivot), as p2collide places map actors). Bolton parts with
+    // a pivot (the Leprechaun hat and beard) and dead pawns' carcass offsets rely on it.
+    let pre = match vm.get_prop(a, "PrePivot") {
+        Some(Value::Vector(v)) if *v != [0.0; 3] => Vec3::from(*v),
+        _ => Vec3::ZERO,
+    };
+    let static_mesh = pre != Vec3::ZERO && matches!(vm.get_prop(a, "DrawType"), Some(Value::Byte(8)));
+    if pre != Vec3::ZERO && !static_mesh {
+        loc += pre;
+    }
+    let m = Mat4::from_translation(loc) * Mat4::from_mat3(rotator_mat3(vm.actor_rot(a))) * Mat4::from_scale(s3 * s);
+    if static_mesh { m * Mat4::from_translation(-pre) } else { m }
+}
+
+/// Actor-to-world transform for drawing a skeletal mesh whose own mesh transform (RotOrigin,
+/// mesh scale, origin) is `mesh_xform`, so that `skel_actor_world(..) * mesh_xform` is UE2's
+/// MeshToWorld. UE2 applies DrawScale * DrawScale3D in mesh space together with the mesh's own
+/// Scale, before RotOrigin (FTranslation(-Origin) * FScale(Scale * DrawScale3D * DrawScale) *
+/// FRotation(RotOrigin) * FRotation(Rotation) * FTranslation(Location + PrePivot)); applying it
+/// after RotOrigin (in actor space, as `actor_world` does) swaps the axes of a non-uniform
+/// scale on every mesh with a yawed RotOrigin. Heads with HeadScale (1.1, 1, 1) (ChamelHead
+/// randomizes a quarter of them) came out 10% longer front to back instead of 10% wider, and
+/// their glasses and hats (SetupBoltons copies the head's DrawScale3D onto head boltons, which
+/// widen in their own space) cut into the face. Uniform scales are unaffected.
+pub fn skel_actor_world(vm: &Vm, a: ObjId, mesh_xform: Mat4) -> Mat4 {
+    let world = actor_world(vm, a);
+    let s3 = match vm.get_prop(a, "DrawScale3D") {
+        Some(Value::Vector(v)) => Vec3::from(*v),
+        _ => return world,
+    };
+    if (s3.x - s3.y).abs() < 1e-6 && (s3.y - s3.z).abs() < 1e-6 {
+        return world;
+    }
+    // `P2GAME_SCALE_ACTOR_SPACE=1`: the old (actor-space) order, for A/B shots.
+    thread_local!(static OLD: bool = std::env::var_os("P2GAME_SCALE_ACTOR_SPACE").is_some());
+    if OLD.with(|o| *o) {
+        return world;
+    }
+    // Move the non-uniform part into mesh space: world * S^-1 * (Ro * S * Ro^-1).
+    let ro = orthonormal(Mat3::from_mat4(mesh_xform));
+    let s = Mat3::from_diagonal(s3);
+    let s_inv = Mat3::from_diagonal(Vec3::ONE / s3.max(Vec3::splat(1e-6)));
+    world * Mat4::from_mat3(s_inv * ro * s * ro.transpose())
 }
 
 fn orthonormal(m: Mat3) -> Mat3 {
@@ -480,7 +525,7 @@ impl GameHost {
         {
             let mut m = self.anims.borrow_mut();
             let Some(x) = m.get_mut(&a) else { return };
-            let world = actor_world(vm, a);
+            let world = skel_actor_world(vm, a, x.inst.skeleton.mesh_xform);
             let ids: Vec<(u64, usize)> = x.inst.attachments().map(|(id, at)| (*id, at.bone)).collect();
             for (id, bone) in ids {
                 // Script may change RelativeLocation/Rotation after attaching (heads do).
@@ -512,7 +557,7 @@ impl GameHost {
                 if x.inst.attachments().next().is_none() || vm.objects[a].deleted {
                     continue;
                 }
-                let world = actor_world(vm, a);
+                let world = skel_actor_world(vm, a, x.inst.skeleton.mesh_xform);
                 let ids: Vec<(u64, usize)> = x.inst.attachments().map(|(id, at)| (*id, at.bone)).collect();
                 for (id, bone) in ids {
                     // Script may change RelativeLocation/Rotation after attaching (heads do).
@@ -763,7 +808,7 @@ impl GameHost {
             "getbonecoords" => {
                 let bone = arg_name(a, 0).unwrap_or_default();
                 let world = actor_world(vm, me);
-                let c = self.with_inst(vm, me, |i| i.skeleton.bone(&bone).map(|b| world * i.bone_actor_matrix(b))).flatten().unwrap_or(world);
+                let c = self.with_inst(vm, me, |i| i.skeleton.bone(&bone).map(|b| skel_actor_world(vm, me, i.skeleton.mesh_xform) * i.bone_actor_matrix(b))).flatten().unwrap_or(world);
                 Value::Struct(vec![
                     ("Origin".into(), vecv(c.w_axis.truncate())),
                     ("XAxis".into(), vecv(c.x_axis.truncate().normalize_or_zero())),
@@ -773,16 +818,16 @@ impl GameHost {
             }
             "getbonerotation" => {
                 let (bone, space) = (arg_name(a, 0).unwrap_or_default(), arg_i(a, 1));
-                let world = actor_world(vm, me);
                 let r = self.with_inst(vm, me, |i| {
                     let b = i.skeleton.bone(&bone)?;
+                    let world = skel_actor_world(vm, me, i.skeleton.mesh_xform);
                     Some(if space == 0 { mat3_to_rotator(orthonormal(Mat3::from_mat4(world * i.bone_actor_matrix(b)))) } else { i.get_bone_rotation(&bone, 1)? })
                 });
                 Value::Rotator(r.flatten().unwrap_or_default())
             }
             "getrootlocation" => {
                 let world = actor_world(vm, me);
-                vecv(self.with_inst(vm, me, |i| world.transform_point3(i.get_root_location())).unwrap_or(world.w_axis.truncate()))
+                vecv(self.with_inst(vm, me, |i| skel_actor_world(vm, me, i.skeleton.mesh_xform).transform_point3(i.get_root_location())).unwrap_or(world.w_axis.truncate()))
             }
             "getrootrotation" => Value::Rotator(self.with_inst(vm, me, |i| i.get_root_rotation()).unwrap_or_default()),
             "getrootlocationdelta" => vecv(self.with_inst(vm, me, |i| i.get_root_location_delta()).unwrap_or(Vec3::ZERO)),

@@ -63,6 +63,14 @@ fn level_hook(host: &GameHost, _vm: &mut Vm) {
     w.map = map;
     w.collision = crate::physics::level_collision();
     let world: SharedFx = Rc::new(RefCell::new(w));
+    // Screenshot aid: `P2FX_CAM=ex,ey,ez;tx,ty,tz` holds the main camera at an Unreal-space eye
+    // looking at a target (frames placed emitters without walking the pawn there).
+    if let Some((e, t)) = std::env::var("P2FX_CAM").ok().and_then(|s| {
+        let v: Vec<f32> = s.split([';', ',']).filter_map(|x| x.trim().parse().ok()).collect();
+        (v.len() == 6).then(|| ([v[0], v[1], v[2]], [v[3], v[4], v[5]]))
+    }) {
+        world.borrow_mut().camera = Some((e, t));
+    }
     CURRENT.with(|c| *c.borrow_mut() = Some(world.clone()));
     host.ext.borrow_mut().push(Rc::new(FxHost { world: world.clone() }));
     let mut frame = FxFrame::default();
@@ -96,8 +104,20 @@ fn level_hook(host: &GameHost, _vm: &mut Vm) {
     // Test hook: `P2FX_CHEATS=1` keeps cheats enabled (Sissy is a toggle whose start state comes
     // from the shared user ini, so scripted runs could not rely on it).
     let force_cheats = std::env::var_os("P2FX_CHEATS").is_some();
+    // Test hook: `P2FX_DROP_BOLTONS=N` calls DropBoltons on every pawn at frame N (what a
+    // bystander does when it panics or dies: cigarettes and other boltons fall off).
+    let drop_at: Option<u32> = std::env::var("P2FX_DROP_BOLTONS").ok().and_then(|s| s.parse().ok());
     host.frame_hooks.borrow_mut().push(Box::new(move |vm, dt| {
         nframe += 1;
+        if drop_at == Some(nframe) {
+            let pawns: Vec<ObjId> = vm.actors.iter().copied().filter(|&a| !vm.objects[a].deleted && vm.class_is_a(vm.objects[a].class, "P2MoCapPawn")).collect();
+            for p in pawns {
+                if !vm.objects[p].deleted {
+                    call(vm, p, "DropBoltons", vec![Value::Vector([0.0; 3])]);
+                }
+            }
+            println!("fx: DropBoltons on every pawn at frame {nframe}");
+        }
         if force_cheats {
             if let Some(g) = vm.level.and_then(|l| vm.get_prop(l, "Game").and_then(|v| v.as_obj())) {
                 vm.set_prop(g, "bAllowCManager", Value::Bool(true));
@@ -163,11 +183,69 @@ fn level_hook(host: &GameHost, _vm: &mut Vm) {
             w = w2;
         }
         w.sync(vm, dt);
+        // Debug: `P2FX_CENSUS=N` prints every live system (class, actor location, live particles,
+        // mean particle speed / age / size and the spread of particle positions) every N frames.
+        if let Some(every) = std::env::var("P2FX_CENSUS").ok().and_then(|s| s.parse::<u32>().ok()).filter(|n| *n > 0) {
+            if nframe % every == 0 {
+                census(vm, &w, nframe);
+            }
+        }
         if let Some(q) = QUEUE.with(|s| s.borrow().clone()) {
             w.snapshot(&mut frame);
             *q.lock().unwrap_or_else(|p| p.into_inner()) = Some(frame.clone());
         }
     }));
+}
+
+fn census(vm: &Vm, w: &FxWorld, nframe: u32) {
+    let filter = std::env::var("P2FX_CENSUS_CLASS").ok().map(|s| s.to_ascii_lowercase());
+    let mut list: Vec<_> = w.systems.values().filter(|fx| filter.as_ref().is_none_or(|f| fx.class.to_ascii_lowercase().contains(f.as_str()))).collect();
+    list.sort_by_key(|fx| fx.id);
+    for fx in list {
+        for (i, (st, d)) in fx.state.emitters.iter().zip(&fx.defs).enumerate() {
+            let alive: Vec<_> = st.particles.iter().take(st.active_particles).filter(|p| p.alive()).collect();
+            let n = alive.len().max(1) as f32;
+            let speed = alive.iter().map(|p| p.velocity.length()).sum::<f32>() / n;
+            let age = alive.iter().map(|p| p.relative_time()).sum::<f32>() / n;
+            let size = alive.iter().map(|p| p.size.x).sum::<f32>() / n;
+            let alpha = alive.iter().map(|p| p.color[3] as f32).sum::<f32>() / n;
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for p in &alive {
+                lo = lo.min(p.location);
+                hi = hi.max(p.location);
+            }
+            let base = vm.get_prop(fx.actor, "Base").and_then(|v| v.as_obj());
+            // Root of the attachment chain (smoke -> bolton -> pawn) and its distance.
+            let mut root = base;
+            for _ in 0..4 {
+                match root.and_then(|r| vm.get_prop(r, "Base").and_then(|v| v.as_obj())) {
+                    Some(n) => root = Some(n),
+                    None => break,
+                }
+            }
+            let root_info = root.map(|r| {
+                let rl = Vec3::from(vm.actor_loc(r));
+                format!("{}@{:?} d={:.0} hidden={:?} draw={:?}", vm.object_name(r), rl.round(), (rl - fx.owner.location).length(), vm.get_prop(r, "bHidden"), vm.get_prop(r, "DrawType"))
+            });
+            println!(
+                "FXCENSUS@{nframe} {}#{} {} [{i}] hidden={} dis={} live={} active={} pps={} speed={speed:.1} age={age:.2} size={size:.1} a={alpha:.0} owner={:?} lo={:?} hi={:?} base={:?} root={:?}",
+                fx.class,
+                fx.id,
+                vm.object_name(fx.actor),
+                fx.hidden,
+                st.disabled,
+                alive.len(),
+                st.active_particles,
+                st.particles_per_second,
+                fx.owner.location.round(),
+                lo.round(),
+                hi.round(),
+                base.map(|b| vm.object_name(b)),
+                root_info,
+            );
+            let _ = d;
+        }
+    }
 }
 
 /// `P2FX_DEMO=gas|blood`: drives the game's own effect classes through the VM, the way the

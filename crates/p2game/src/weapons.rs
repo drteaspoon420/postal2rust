@@ -959,7 +959,7 @@ fn fp_weapon(
             continue;
         }
         let Some(x) = anims.get_mut(a) else { continue };
-        let to_world = actor_world(vm, *a) * x.inst.skeleton.mesh_xform;
+        let to_world = p2game::host::skel_actor_world(vm, *a, x.inst.skeleton.mesh_xform) * x.inst.skeleton.mesh_xform;
         for (e, m) in r.joints.iter().zip(x.inst.bone_matrices()) {
             if let Ok(mut tf) = tfs.get_mut(*e) {
                 *tf = Transform::from_matrix(cm * to_world * *m * ci);

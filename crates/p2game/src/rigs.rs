@@ -10,7 +10,7 @@
 use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::prelude::*;
 use p2anim::rig::{RigAssets, RigCache, c_mat};
-use p2game::host::{GameHost, actor_world, resolve_path};
+use p2game::host::{GameHost, resolve_path, skel_actor_world};
 use std::collections::{HashMap, HashSet};
 use uscript::vm::{ObjId, Value, Vm};
 
@@ -239,7 +239,7 @@ pub fn pose_rigs(host: &GameHost, vm: &Vm, rigs: &Query<&VmRig>, tfs: &mut Query
             }
             continue;
         };
-        let to_world = actor_world(vm, r.actor) * x.inst.skeleton.mesh_xform;
+        let to_world = skel_actor_world(vm, r.actor, x.inst.skeleton.mesh_xform) * x.inst.skeleton.mesh_xform;
         for (e, m) in r.joints.iter().zip(x.inst.bone_matrices()) {
             if let Ok(mut tf) = tfs.get_mut(*e) {
                 *tf = Transform::from_matrix(c * to_world * *m * ci);
