@@ -58,7 +58,8 @@ fn walking_steps_stops_at_wall_and_hits_wall_event() {
     let ev = run(&mut w, 3.0);
     let a = w.get(p).unwrap();
     assert_eq!(a.physics, Physics::Walking);
-    assert!((a.location.z - 72.0 - 20.0).abs() < 2.0, "on the step: z {}", a.location.z);
+    // Walking pawns float MIN..MAX_FLOOR_DIST (1.9..2.4) above the floor, like UE2.
+    assert!((a.location.z - 72.0 - 20.0 - 2.15).abs() < 1.0, "on the step: z {}", a.location.z);
     assert!(a.location.x > 800.0 - 28.0 - 3.0 && a.location.x <= 800.0 - 28.0, "x {}", a.location.x);
     assert!(ev.iter().any(|e| matches!(e, Event::HitWall { actor, wall: None, .. } if *actor == p)), "HitWall");
 }

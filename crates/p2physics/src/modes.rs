@@ -17,6 +17,13 @@ pub const KARMA_GRAVITY_SCALE: f32 = 4.5;
 
 /// Extra distance probed below a walking pawn for floor contact.
 const FLOOR_PROBE: f32 = 4.0;
+/// UE2 walking keeps a pawn's cylinder floating MIN..MAX above its floor (measured along Z) and
+/// re-centres it on FLOOR_DIST when it leaves that band. Sitting on the sweep skin (0.5) instead
+/// drew every walking pawn ~1.7 uu low: skeletal meshes are authored for the original gap, so
+/// shoes sank into the ground (and the eye was that much lower).
+const MIN_FLOOR_DIST: f32 = 1.9;
+const MAX_FLOOR_DIST: f32 = 2.4;
+const FLOOR_DIST: f32 = 0.5 * (MIN_FLOOR_DIST + MAX_FLOOR_DIST);
 /// Fluid friction applied while swimming when the volume does not set one.
 const MIN_FLUID_FRICTION: f32 = 0.3;
 
@@ -159,12 +166,25 @@ impl PhysWorld {
         }
         // Floor check.
         let probe = step + FLOOR_PROBE;
+        let probe_from = pos;
         let (down, floor) = self.sweep_pos(id, pos, Vec3::Z * -probe, &[]);
         let floor_ok = floor.filter(|h| h.start_solid || h.normal.z >= walkable);
         match floor_ok {
             Some(h) => {
                 if !h.start_solid {
-                    pos = down;
+                    // Height at which the cylinder touches the floor; keep the pawn in UE2's
+                    // floor band above it (no move while it already is).
+                    let contact = probe_from.z - h.t * probe;
+                    let gap = probe_from.z - contact;
+                    pos = probe_from;
+                    if !(MIN_FLOOR_DIST..=MAX_FLOOR_DIST).contains(&gap) {
+                        let target = contact + FLOOR_DIST;
+                        if target > pos.z {
+                            pos = self.sweep_pos(id, pos, Vec3::Z * (target - pos.z), &[]).0;
+                        } else {
+                            pos.z = target.max(down.z);
+                        }
+                    }
                 }
                 if let Some(p) = self.actor_mut(id).pawn.as_mut() {
                     p.floor = if h.start_solid { Vec3::Z } else { h.normal };
@@ -764,7 +784,9 @@ impl PhysWorld {
         let (pos, hit) = self.sweep_pos(id, start, Vec3::Z * -max_drop, &[]);
         match hit {
             Some(h) if !h.start_solid => {
-                self.commit(id, pos + Vec3::Z * SKIN * 0.0, None, &[]);
+                // Pawns float FLOOR_DIST above the floor like walking keeps them.
+                let pos = if self.actor(id).is_pawn() { self.sweep_pos(id, pos, Vec3::Z * (FLOOR_DIST - SKIN), &[]).0 } else { pos };
+                self.commit(id, pos, None, &[]);
                 if self.actor(id).is_pawn() {
                     self.set_physics(id, Physics::Walking);
                     if let Some(pp) = self.actor_mut(id).pawn.as_mut() {
