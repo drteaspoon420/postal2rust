@@ -394,9 +394,22 @@ pub fn spawn_outdoor(commands: &mut Commands, s: OutdoorSpawn, build_mesh: fn(&M
                 Transform::from_translation(sky.origin),
                 layer,
                 SkyCamera { origin: sky.origin },
+                overlay_cluster_config(),
             ));
         }
     });
+}
+
+/// Light clustering for cameras whose render layer holds no point or spot lights (the sky view,
+/// the first-person weapon overlay): map lights are on the default layer, so the default cluster
+/// grid only costs a per-frame GPU clustering pass per camera. `P2VIEW_OVERLAY_CLUSTERS` =
+/// `single` (default: one cluster, directional lights unaffected) / `grid` (Bevy's default
+/// cluster grid, the old behaviour).
+pub fn overlay_cluster_config() -> bevy::light::cluster::ClusterConfig {
+    match std::env::var("P2VIEW_OVERLAY_CLUSTERS").as_deref() {
+        Ok("grid") => bevy::light::cluster::ClusterConfig::default(),
+        _ => bevy::light::cluster::ClusterConfig::Single,
+    }
 }
 
 /// Keeps the sky camera at the sky zone origin with the main view's rotation and field of view,

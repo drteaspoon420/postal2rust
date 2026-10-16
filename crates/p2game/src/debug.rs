@@ -13,8 +13,13 @@ pub(crate) struct DebugOverlayPlugin;
 
 impl Plugin for DebugOverlayPlugin {
     fn build(&self, app: &mut App) {
-        // Hidden until F3 (players). `--debug` or `P2GAME_DEBUG=1` show it from the start.
-        let visible = std::env::args().any(|a| a == "--debug") || std::env::var_os("P2GAME_DEBUG").is_some();
+        // Hidden until F3 (players). `--debug` or `P2GAME_DEBUG=1` show it from the start, and so
+        // does every scripted test run (same detection as the muting in main.rs) so test footage
+        // and screenshots carry fps and state. `--no-debug` still hides it (pixel-compare shots).
+        let args: Vec<String> = std::env::args().collect();
+        let scripted = ["P2GAME_MUTE", "P2GAME_SHOTS", "P2GAME_EXIT", "P2GAME_EXIT_SECS", "P2GAME_EXEC", "P2GAME_REAL", "P2GAME_PILOT", "P2GAME_DEMO_GOTO"].iter().any(|v| std::env::var_os(v).is_some())
+            || args.iter().any(|a| a == "--profile-secs" || a == "--screenshot");
+        let visible = !args.iter().any(|a| a == "--no-debug") && (args.iter().any(|a| a == "--debug") || std::env::var_os("P2GAME_DEBUG").is_some() || scripted);
         app.insert_resource(DebugOverlay { visible, ..default() }).add_systems(Startup, spawn_overlay);
     }
 }

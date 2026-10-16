@@ -151,6 +151,13 @@ pub(crate) fn initial_window(vm: &mut Vm, title: String) -> Window {
         Mode::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Primary, VideoModeSelection::Current),
     };
     v.dirty = v.mode == Mode::Fullscreen;
+    // Where the user last left the window (position and size), for every windowed launch.
+    crate::window_memory::apply_saved(&mut w);
+    if let (WindowMode::Windowed, Some((_, _, sw, sh))) = (w.mode, crate::window_memory::saved()) {
+        if std::env::var_os("P2GAME_RES").is_none() {
+            (v.width, v.height) = (sw, sh);
+        }
+    }
     with_video(|s| *s = v);
     w
 }

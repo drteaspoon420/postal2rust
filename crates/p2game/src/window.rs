@@ -120,6 +120,12 @@ pub(crate) struct Sim {
     /// A save load replaced the level this frame: `travel` drops the old level's entities and rigs
     /// (their actor ids are stale) before anything else reads them.
     loaded_save: bool,
+    /// Static mesh merge plan of the current level and its export -> actor map, applied once
+    /// level-start script (PrepActorsByGroup) has run (see `merge_statics`).
+    merge: Option<(p2view::spawn::MergePlan, HashMap<usize, ObjId>)>,
+    /// Actors whose meshes were merged, and the script frame at which to verify they stayed put.
+    merged: Vec<ObjId>,
+    merged_check: u64,
 }
 
 impl Sim {
@@ -175,6 +181,7 @@ struct Frames {
 
 pub fn run(cfg: BootConfig, args: Args) {
     let _ = BOOT.set(std::time::Instant::now());
+    crate::sampler::register_current("main");
     // The original's red WARNING disclaimer (System\Postal2Splash.bmp) while the engine boots.
     crate::splash::show(&cfg.system_dir);
     let a: Vec<String> = std::env::args().collect();
@@ -183,8 +190,22 @@ pub fn run(cfg: BootConfig, args: Args) {
     let view_npc = a.iter().position(|x| x == "--view-npc").map(|i| a.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0));
     let url = args.map.clone().unwrap_or_else(|| cfg.startup_map.clone());
     let (map, url_opts) = p2game::boot::split_url(&url);
-    let options = format!("{url_opts}{}", args.options);
-    let game_class = args.game_class.clone().or_else(|| p2game::boot::url_option(&url_opts, "Game"));
+    let mut options = format!("{url_opts}{}", args.options);
+    // Scripted test runs (any automation env or --profile-secs/--screenshot) start on Monday
+    // (`SetDay=1`, P2GameInfoSingle's 1-based ForceDayOnStartup) unless a day was given, so
+    // benchmarks and screenshots see the same day every time. `P2GAME_TEST_DAY=N` picks another.
+    let scripted = ["P2GAME_MUTE", "P2GAME_SHOTS", "P2GAME_EXIT", "P2GAME_EXIT_SECS", "P2GAME_EXEC", "P2GAME_REAL", "P2GAME_PILOT", "P2GAME_DEMO_GOTO"].iter().any(|v| std::env::var_os(v).is_some())
+        || a.iter().any(|x| x == "--profile-secs" || x == "--screenshot");
+    if scripted && args.map.is_some() && args.game_class.is_none() && p2game::boot::url_option(&options, "Game").is_none() {
+        // A bare `--map` picks the map's default game (AWPGameInfo on suburbs-3: the weekend,
+        // which has no Monday). Tests play the classic week.
+        options.push_str("?Game=GameTypes.GameSinglePlayer");
+    }
+    if scripted && p2game::boot::url_option(&options, "SetDay").is_none() {
+        let day = std::env::var("P2GAME_TEST_DAY").ok().and_then(|s| s.parse::<i32>().ok()).unwrap_or(1);
+        options.push_str(&format!("?SetDay={day}"));
+    }
+    let game_class = args.game_class.clone().or_else(|| p2game::boot::url_option(&options, "Game"));
 
     // Script world first: if the map cannot boot there is nothing to show.
     let mut world = P2World::new(cfg).unwrap_or_else(|e| panic!("VM init failed: {e}"));
@@ -197,18 +218,35 @@ pub fn run(cfg: BootConfig, args: Args) {
     game.begin_play(&options);
     game.drain_log(false);
     println!("begin play done: {} live actors, GameInfo {} ({:.2} s since boot)", game.live_actors(), game.game_class, boot_secs());
-    let mut sim = Sim { game, driven: Vec::new(), paused: false, frames: 0, moved_total: 0, rigs: Default::default(), dynmesh: Default::default(), on_travel: Vec::new(), reload: true, loaded_save: false };
+    let mut sim = Sim { game, driven: Vec::new(), paused: false, frames: 0, moved_total: 0, rigs: Default::default(), dynmesh: Default::default(), on_travel: Vec::new(), reload: true, loaded_save: false, merge: None, merged: Vec::new(), merged_check: 0 };
 
     let mut app = App::new();
     let t_plugins = std::time::Instant::now();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let mut plugins = DefaultPlugins.set(WindowPlugin {
         // Size, window mode and vsync from the saved video settings (settings.rs; env overrides
         // P2GAME_RES=WxH, P2GAME_FULLSCREEN=1, P2GAME_NOVSYNC=1, P2GAME_FPS_LIMIT=N).
         primary_window: Some(crate::settings::initial_window(&mut sim.game.world.vm, "Postal 2 Rust/Bevy".to_string())),
         ..default()
-    }));
+    });
+    if std::env::var_os("P2GAME_SAMPLE").is_some() {
+        // Profiling: sample Bevy's worker threads too (the render thread mostly waits on them).
+        let hook = || -> std::sync::Arc<dyn Fn() + Send + Sync> { std::sync::Arc::new(|| crate::sampler::register_current("workers")) };
+        let mut tp = bevy::app::TaskPoolOptions::default();
+        tp.compute.on_thread_spawn = Some(hook());
+        tp.async_compute.on_thread_spawn = Some(hook());
+        tp.io.on_thread_spawn = Some(hook());
+        plugins = plugins.set(bevy::app::TaskPoolPlugin { task_pool_options: tp });
+    }
+    if std::env::var_os("P2VIEW_NO_BINDLESS").is_some() {
+        // A/B: per-material bind groups for every material (no texture binding arrays), as before
+        // the baked materials went bindless.
+        let wgpu = bevy::render::settings::WgpuSettings { disabled_features: Some(bevy::render::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY), ..default() };
+        plugins = plugins.set(bevy::render::RenderPlugin { render_creation: wgpu.into(), ..default() });
+    }
+    app.add_plugins(plugins);
     crate::settings::install(&mut sim);
     app.add_plugins(crate::settings::SettingsPlugin);
+    app.add_plugins(crate::window_memory::WindowMemoryPlugin);
     println!("load: bevy plugins added in {:.2} s ({:.2} s since boot)", t_plugins.elapsed().as_secs_f32(), boot_secs());
     // HUD, menus, console and player input from script (ui.rs).
     crate::ui::install(&mut app, &mut sim, &args.root);
@@ -237,14 +275,83 @@ pub fn run(cfg: BootConfig, args: Args) {
         .init_resource::<LevelSnapshot>()
         .insert_non_send(sim)
         .add_systems(Startup, cluster_capacity)
+        ;
+    // GPU upload budget per frame (Bevy's render asset limiter); unset = no limit.
+    if let Some(mb) = std::env::var("P2GAME_UPLOAD_MB").ok().and_then(|s| s.parse::<f64>().ok()).filter(|&m| m > 0.0) {
+        app.insert_resource(bevy::render::render_asset::RenderAssetBytesPerFrame::new((mb * 1048576.0) as usize));
+    }
+    app
         .add_systems(
             Update,
-            (load_scene, tag_level_entities, tick_script, travel, crate::ui::ui_frame, spawn_rigs, sync_transforms, dyn_meshes, pose_rigs, crate::ui::hide_own_body, frame_npc, fly_camera, crate::ui::follow_player, crate::cinema_view::apply_cinema_view, crate::zone_fog::zone_fog, crate::debug::update_overlay, report, capture).chain(),
+            (
+                (load_scene, tag_level_entities, tick_script, travel, merge_statics, crate::ui::ui_frame, spawn_rigs, sync_transforms, dyn_meshes, pose_rigs, crate::ui::hide_own_body, frame_npc, fly_camera, crate::ui::follow_player, crate::cinema_view::apply_cinema_view, cam_override).chain(),
+                (crate::zone_fog::zone_fog, crate::debug::update_overlay, report, capture, mesh_census, perf_hide).chain(),
+            )
+                .chain(),
         )
-        .run();
+        ;
+    if std::env::var_os("P2GAME_SAMPLE").is_some() {
+        if let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) {
+            render.add_systems(
+                bevy::render::Render,
+                (|_world: &mut World, mut done: Local<bool>| {
+                    if !std::mem::replace(&mut *done, true) {
+                        crate::sampler::register_current("render");
+                    }
+                })
+                .in_set(bevy::render::RenderSystems::Cleanup),
+            );
+        }
+    }
+    if std::env::var_os("P2GAME_RENDER_PROBE").is_some() {
+        render_probe(&mut app);
+    }
+    app.run();
+    crate::sampler::finish();
     crate::cursor::release_cursor();
     // Close the audio stream while the process is still whole (see `audio::shutdown_device`).
     p2game::audio::shutdown_device();
+}
+
+/// `P2GAME_RENDER_PROBE=1`: laps between the render sub-app's system sets; prints a breakdown for
+/// every render frame over 50 ms (diagnostics for load/travel stalls).
+fn render_probe(app: &mut App) {
+    use bevy::render::{Render, RenderSystems as R};
+    static LAPS: std::sync::Mutex<Vec<(&'static str, std::time::Instant)>> = std::sync::Mutex::new(Vec::new());
+    fn lap(name: &'static str) -> impl FnMut() {
+        move || LAPS.lock().unwrap().push((name, std::time::Instant::now()))
+    }
+    let Some(render) = app.get_sub_app_mut(bevy::render::RenderApp) else { return };
+    render.add_systems(bevy::render::ExtractSchedule, lap("extract"));
+    render.add_systems(
+        Render,
+        (
+            lap("start").before(R::PrepareAssets),
+            lap("prepare_assets").after(R::PrepareAssets).before(R::PrepareMeshes),
+            lap("prepare_meshes").after(R::PrepareMeshes).before(R::Specialize),
+            lap("specialize").after(R::Specialize).before(R::Queue),
+            lap("queue").after(R::Queue).before(R::PhaseSort),
+            lap("phase_sort").after(R::PhaseSort).before(R::Prepare),
+            lap("prepare").after(R::Prepare).before(R::Render),
+            lap("render").after(R::Render).before(R::Cleanup),
+            (|| {
+                let mut l = LAPS.lock().unwrap();
+                let now = std::time::Instant::now();
+                if let Some(&(_, t0)) = l.first() {
+                    let total = now.duration_since(t0).as_secs_f64() * 1e3;
+                    if total > 50.0 {
+                        let mut s = String::new();
+                        for w in l.windows(2) {
+                            s += &format!(" {} {:.1}", w[1].0, w[1].1.duration_since(w[0].1).as_secs_f64() * 1e3);
+                        }
+                        println!("RENDER PROBE {total:.1} ms:{s} cleanup-lap {:.1}", now.duration_since(l.last().unwrap().1).as_secs_f64() * 1e3);
+                    }
+                }
+                l.clear();
+            })
+            .in_set(R::Cleanup),
+        ),
+    );
 }
 
 /// Process start of the windowed host, for load-time reports.
@@ -338,6 +445,7 @@ fn travel(
         sim.loaded_save = false;
         drop_level_entities(&mut commands, &level, &vm_rigs);
         sim.driven.clear();
+        sim.merge = None;
         sim.rigs.clear();
         sim.reload = true;
         if let Ok(mut w) = windows.single_mut() {
@@ -399,6 +507,7 @@ fn travel(
     sim.game.drain_log(false);
     drop_level_entities(&mut commands, &level, &vm_rigs);
     sim.driven.clear();
+    sim.merge = None;
     sim.rigs.clear();
     sim.reload = true;
     for f in sim.on_travel.iter_mut() {
@@ -433,6 +542,17 @@ fn drop_level_entities(commands: &mut Commands, level: &Query<Entity, With<Level
     }
 }
 
+/// Map export index -> VM actor for the level's actors. After a save load the actors came from the
+/// save package: pair them with the map's exports by object name (saved actors keep their names).
+fn level_actor_pairs(sim: &Sim, map: &std::sync::Arc<upkg::Package>) -> Vec<(usize, ObjId)> {
+    if std::sync::Arc::ptr_eq(map, &sim.game.level.map) {
+        return sim.game.level.actors.clone();
+    }
+    let lm = &sim.game.level.map;
+    let by_name: HashMap<String, ObjId> = sim.game.level.actors.iter().map(|&(e, o)| (lm.name(lm.exports[e].name).to_ascii_lowercase(), o)).collect();
+    map.exports.iter().enumerate().filter_map(|(i, x)| by_name.get(&map.name(x.name).to_ascii_lowercase()).map(|&o| (i, o))).collect()
+}
+
 fn load_scene(
     mut commands: Commands,
     args: Res<WinArgs>,
@@ -457,22 +577,24 @@ fn load_scene(
     let map = sim.game.host.map.borrow().clone().unwrap_or_else(|| sim.game.level.map.clone());
     lib.insert(map.clone());
     let t0 = std::time::Instant::now();
+    // Pickup lighting first, and their vertex-light bake on a worker while the scene builds (see
+    // DynMeshTracker::start_bake_ahead; the first frame waits for it, nothing visible changes).
+    let level_actors: Vec<(usize, ObjId)> = level_actor_pairs(&sim, &map);
+    {
+        let sim = &mut *sim;
+        sim.dynmesh.set_lighting(crate::dynmesh::ActorLighting::new(&map, &level_actors));
+        sim.dynmesh.start_bake_ahead(&lib, &sim.game.world.vm, &map, &level_actors, sim.game.player_controller);
+    }
     let mut data = scene::build_scene(&lib, &map, &scene::Options { gpu_bc, projectors: false }).unwrap_or_else(|e| panic!("scene: {e}"));
     let t_build = t0.elapsed().as_secs_f32();
-    let spawned = spawn::spawn_scene_with(&mut commands, &mut data, spawn::SpawnOptions { unlit: args.unlit, baked: true }, &mut images, &mut meshes, &mut materials);
+    let merge = std::env::var_os("P2GAME_NO_MERGE").is_none();
+    let mut spawned = spawn::spawn_scene_with(&mut commands, &mut data, spawn::SpawnOptions { unlit: args.unlit, baked: true, merge }, &mut images, &mut meshes, &mut materials);
     println!("load: scene built in {t_build:.2} s, spawned in {:.2} s ({:.2} s since boot)", t0.elapsed().as_secs_f32() - t_build, boot_secs());
 
     // Link render entities to VM actors by map export index. spawn_scene_with spawns one entity per
     // instance in instance order, so an actor's instances and entities pair up in order.
     // After a save load the actors came from the save package: pair them with the map's exports
-    // by object name (saved actors keep their map names).
-    let level_actors: Vec<(usize, ObjId)> = if std::sync::Arc::ptr_eq(&map, &sim.game.level.map) {
-        sim.game.level.actors.clone()
-    } else {
-        let lm = &sim.game.level.map;
-        let by_name: HashMap<String, ObjId> = sim.game.level.actors.iter().map(|&(e, o)| (lm.name(lm.exports[e].name).to_ascii_lowercase(), o)).collect();
-        map.exports.iter().enumerate().filter_map(|(i, x)| by_name.get(&map.name(x.name).to_ascii_lowercase()).map(|&o| (i, o))).collect()
-    };
+    // by object name (saved actors keep their map names). (`level_actors` is computed above.)
     let by_export: HashMap<usize, ObjId> = level_actors.iter().map(|&(e, o)| (e, o)).collect();
     let mut inst_by_export: HashMap<usize, Vec<Mat4>> = HashMap::new();
     for i in &data.instances {
@@ -494,16 +616,46 @@ fn load_scene(
         link(*export, ents, &mut driven);
     }
     let static_groups = driven.len();
+    // After a save load, map actors without a saved counterpart were destroyed before the save
+    // (PrepActorsByGroup removed other days' and holidays' meshes: vote signs on Monday, holiday
+    // decorations). p2view draws the original map, so drop their entities (despawn: zone culling
+    // rewrites Visibility every frame).
+    let mut gone = 0;
+    if !std::sync::Arc::ptr_eq(&map, &sim.game.level.map) {
+        for (export, ents) in &spawned.actors {
+            if !by_export.contains_key(export) {
+                gone += 1;
+                if std::env::var_os("P2GAME_SAVE_GONE_TRACE").is_some() {
+                    println!("save gone: {}", map.name(map.exports[*export].name));
+                }
+                for &e in ents {
+                    commands.entity(e).despawn();
+                }
+            }
+        }
+    }
     for (m, ents) in &spawned.movers {
         link(m.export, ents, &mut driven);
     }
     println!(
-        "render: {} actor entity groups linked to VM actors ({static_groups} static mesh actors, {} movers; {} static mesh instances)",
+        "render: {} actor entity groups linked to VM actors ({static_groups} static mesh actors, {} movers; {} static mesh instances; {gone} map actors absent from the save hidden)",
         driven.len(),
         driven.len() - static_groups,
         data.instances.len()
     );
+    // Actors already hidden at load (bHidden) start hidden: sync only reacts to changes.
+    for d in driven.iter().filter(|d| d.last.hidden) {
+        for (e, _) in &d.entities {
+            commands.entity(*e).insert((Visibility::Hidden, p2view::zones::ActorHidden));
+        }
+    }
     sim.driven = driven;
+    // Movers are driven every frame, so they never merge.
+    let mover_exports: std::collections::HashSet<usize> = spawned.movers.iter().map(|(m, _)| m.export).collect();
+    sim.merge = spawned.merge.take().map(|mut p| {
+        p.candidates.retain(|c| !mover_exports.contains(&c.export) && by_export.contains_key(&c.export));
+        (p, by_export.clone())
+    });
     let mut rendered: std::collections::HashSet<ObjId> = spawned.actors.keys().chain(spawned.movers.iter().map(|(m, _)| &m.export)).filter_map(|e| by_export.get(e).copied()).collect();
     // Every actor the map saved a StaticMesh for is drawn by p2view (main world, sky zone or
     // terrain decoration); only class-default static meshes are left to dynmesh.
@@ -514,7 +666,6 @@ fn load_scene(
     }
     let mut dm = std::mem::take(&mut sim.dynmesh);
     dm.level_loaded(&sim.game.world.vm, &rendered, sim.game.player_controller);
-    dm.set_lighting(crate::dynmesh::ActorLighting::new(&map, &level_actors));
     println!("render: {} level actors with class-default static meshes drawn at runtime", dm.level_extra_count());
     if std::env::var_os("P2GAME_DYN_TRACE").is_some() {
         for (e, o) in &level_actors {
@@ -556,11 +707,19 @@ fn tick_script(time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, ui: Res<crate::
     }
     // Clamp long frames (asset upload stalls) the way the engine caps its tick delta.
     let dt = time.delta_secs().clamp(0.0, 0.2);
+    let t_tick = std::time::Instant::now();
     sim.game.tick(dt);
+    if let Some(lim) = std::env::var("P2GAME_SPIKES").ok().and_then(|s| s.parse::<f64>().ok()) {
+        let ms = t_tick.elapsed().as_secs_f64() * 1000.0;
+        if ms > lim {
+            println!("SPIKE world tick {ms:.1} ms");
+        }
+    }
     sim.game.drain_log(false);
     // SaveGame / LoadGame console commands (a load replaces the level: rebuild the scene).
+    let t_save = std::time::Instant::now();
     for l in p2game::save::process_requests(&mut sim.game) {
-        println!("{l}");
+        println!("{l} ({:.0} ms)", t_save.elapsed().as_secs_f64() * 1000.0);
         if l.starts_with("LoadGame") && !l.contains("failed") {
             sim.loaded_save = true;
         }
@@ -568,22 +727,162 @@ fn tick_script(time: Res<Time>, keys: Res<ButtonInput<KeyCode>>, ui: Res<crate::
     sim.frames += 1;
 }
 
-fn sync_transforms(mut sim: NonSendMut<Sim>, mut q: Query<(&mut Transform, &mut Visibility)>) {
+/// Merges the level's static mesh actors that script can no longer change into shared meshes
+/// (thousands of separate draws made town render-thread bound). Runs once per level, after
+/// level-start script: P2GameInfoSingle's startup state runs PrepActorsByGroup, which may still
+/// destroy grouped static meshes (other days, holidays). Merged actors must be bStatic (script
+/// cannot move or destroy them later), visible and alive; their entities stop being driven.
+/// `P2GAME_NO_MERGE` turns this off.
+fn merge_statics(mut commands: Commands, mut sim: NonSendMut<Sim>, mut meshes: ResMut<Assets<Mesh>>, materials: Res<Assets<StandardMaterial>>) {
+    // Script frame 2: the GameInfo's startup state code (PrepActorsByGroup) runs on the first tick.
+    if sim.merge.is_none() || sim.frames < 2 {
+        return;
+    }
+    let _t = SysTimer::new("merge");
+    let sim = &mut *sim;
+    let Some((plan, by_export)) = sim.merge.take() else { return };
+    let vm = &sim.game.world.vm;
+    let pb = |o: ObjId, n: &str| vm.get_prop(o, n).is_some_and(|v| v.as_bool());
+    let keep = |e: usize| by_export.get(&e).is_some_and(|&o| !vm.objects[o].deleted && pb(o, "bStatic") && !pb(o, "bHidden"));
+    let t0 = std::time::Instant::now();
+    let candidates = plan.candidates.len();
+    let merged_actors: std::collections::HashSet<ObjId> = plan.candidates.iter().filter(|c| keep(c.export)).filter_map(|c| by_export.get(&c.export).copied()).collect();
+    let (gone, spawned) = plan.apply(keep, &mut commands, &mut meshes, &materials);
+    // Merged meshes belong to the level (despawned on travel).
+    for &e in &spawned {
+        commands.entity(e).insert(LevelEntity);
+    }
+    let gone: std::collections::HashSet<Entity> = gone.into_iter().collect();
+    for d in sim.driven.iter_mut() {
+        d.entities.retain(|(e, _)| !gone.contains(e));
+    }
+    sim.driven.retain(|d| !d.entities.is_empty());
+    sim.merged = by_export.values().copied().filter(|&o| merged_actors.contains(&o)).collect();
+    sim.merged_check = sim.frames + 300;
+    println!("render: merged {} of {candidates} candidate static mesh sections into {} meshes in {:.0} ms ({} driven actor groups left)", gone.len(), spawned.len(), t0.elapsed().as_secs_f64() * 1000.0, sim.driven.len());
+}
+
+/// `P2GAME_HIDE=skinned,level,other`: perf attribution, hides those mesh categories every frame
+/// (skinned = animated rigs, level = map geometry spawned at load, other = everything else:
+/// runtime static meshes, effects, attachments).
+fn perf_hide(mut q: Query<(&mut Visibility, Has<bevy::mesh::skinning::SkinnedMesh>, Has<LevelEntity>), With<Mesh3d>>, mut what: Local<Option<(bool, bool, bool)>>) {
+    let (s, l, o) = *what.get_or_insert_with(|| {
+        let v = std::env::var("P2GAME_HIDE").unwrap_or_default();
+        (v.contains("skinned"), v.contains("level"), v.contains("other"))
+    });
+    if !(s || l || o) {
+        return;
+    }
+    for (mut vis, sk, lv) in &mut q {
+        let hide = if sk { s } else if lv { l } else { o };
+        if hide && *vis != Visibility::Hidden {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
+
+/// `P2GAME_MESH_CENSUS=1`: every 5 s, counts the mesh entities visible to some camera, by kind.
+fn mesh_census(
+    time: Res<Time>,
+    mut last: Local<f32>,
+    q: Query<(&ViewVisibility, Has<p2view::zones::ZoneTag>, Has<bevy::mesh::skinning::SkinnedMesh>, Has<bevy::camera::visibility::VisibilityRange>, Has<LevelEntity>, Option<&bevy::camera::visibility::RenderLayers>), With<Mesh3d>>,
+    mats: Query<(&ViewVisibility, &Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>, Option<&MeshMaterial3d<p2view::baked::BakedMaterial>>, Has<bevy::mesh::skinning::SkinnedMesh>)>,
+) {
+    if std::env::var_os("P2GAME_MESH_CENSUS").is_none() || time.elapsed_secs() - *last < 5.0 {
+        return;
+    }
+    *last = time.elapsed_secs();
+    let (mut total, mut vis, mut skinned, mut ranged, mut zoned, mut level, mut layered, mut other) = (0, 0, 0, 0, 0, 0, 0, 0);
+    for (v, z, s, r, l, layers) in &q {
+        total += 1;
+        if !v.get() {
+            continue;
+        }
+        vis += 1;
+        if s {
+            skinned += 1;
+        } else if r {
+            ranged += 1;
+        } else if layers.is_some() {
+            layered += 1;
+        } else if z {
+            zoned += 1;
+        } else if l {
+            level += 1;
+        } else {
+            other += 1;
+        }
+    }
+    println!("mesh census: {total} mesh entities, {vis} visible: skinned {skinned} ranged(deco/cull) {ranged} layered(sky/fp) {layered} zoned {zoned} level {level} other {other}");
+    // Distinct materials / (mesh, material) pairs among visible meshes: what batching can merge.
+    let (mut sm, mut bm, mut pairs, mut skin_m) = (std::collections::HashSet::new(), std::collections::HashSet::new(), std::collections::HashSet::new(), std::collections::HashSet::new());
+    for (v, m, s, b, sk) in &mats {
+        if !v.get() {
+            continue;
+        }
+        let key = s.map(|x| format!("s{:?}", x.0.id())).or_else(|| b.map(|x| format!("b{:?}", x.0.id()))).unwrap_or_default();
+        if let Some(x) = s {
+            sm.insert(x.0.id());
+        }
+        if let Some(x) = b {
+            bm.insert(x.0.id());
+        }
+        if sk {
+            skin_m.insert(key.clone());
+        }
+        pairs.insert((m.0.id(), key));
+    }
+    println!("mesh census: visible materials: standard {} baked {} (skinned {}); distinct mesh+material pairs {}", sm.len(), bm.len(), skin_m.len(), pairs.len());
+}
+
+fn sync_transforms(mut commands: Commands, mut sim: NonSendMut<Sim>, mut q: Query<(&mut Transform, &mut Visibility)>) {
     let _t = SysTimer::new("sync");
     let sim = &mut *sim;
+    // Merged actors are no longer driven: report any that script changed after all (should be none).
+    if sim.merged_check != 0 && sim.frames >= sim.merged_check {
+        sim.merged_check = 0;
+        let vm = &sim.game.world.vm;
+        let bad: Vec<String> = sim.merged.iter().filter(|&&o| vm.objects[o].deleted || vm.get_prop(o, "bHidden").is_some_and(|v| v.as_bool())).map(|&o| vm.object_name(o)).collect();
+        println!("render: merge check: {} of {} merged actors later destroyed or hidden {:?}", bad.len(), sim.merged.len(), &bad[..bad.len().min(10)]);
+    }
     let vm = &sim.game.world.vm;
     let mut moved = 0;
+    // Destroyed actors (PrepActorsByGroup: other days' vote signs, inactive holidays' kissing
+    // booth and leprechaun props; anything script destroys later) lose their entities for good.
+    // Hiding them was not enough: zone culling rewrites Visibility whenever the camera changes
+    // zone and brought them back.
+    sim.driven.retain(|d| {
+        if !vm.objects[d.actor].deleted {
+            return true;
+        }
+        for (e, _) in &d.entities {
+            if let Ok(mut ec) = commands.get_entity(*e) {
+                ec.despawn();
+            }
+        }
+        false
+    });
     for d in sim.driven.iter_mut() {
-        let now = if vm.objects[d.actor].deleted { Pose { hidden: true, ..d.last } } else { pose_with(vm, d.actor, &d.slots) };
+        let now = pose_with(vm, d.actor, &d.slots);
         if now == d.last {
             continue;
         }
         let delta = placement(now.loc, now.rot, now.scale) * d.inv_initial;
+        let hide_changed = now.hidden != d.last.hidden;
         for (e, base) in d.entities.iter_mut() {
             if let Ok((mut tf, mut vis)) = q.get_mut(*e) {
                 let b = *base.get_or_insert_with(|| Affine3A::from_mat4(tf.to_matrix()));
                 *tf = Transform::from_matrix(Mat4::from(delta * b));
-                *vis = if now.hidden { Visibility::Hidden } else { Visibility::Inherited };
+                if hide_changed {
+                    // The marker keeps zone culling from showing a script-hidden actor again.
+                    if now.hidden {
+                        *vis = Visibility::Hidden;
+                        commands.entity(*e).insert(p2view::zones::ActorHidden);
+                    } else {
+                        *vis = Visibility::Inherited;
+                        commands.entity(*e).remove::<p2view::zones::ActorHidden>();
+                    }
+                }
             }
         }
         d.last = now;
@@ -696,6 +995,32 @@ pub(crate) fn cam_rot(yaw: f32, pitch: f32) -> Quat {
     Quat::from_rotation_y(yaw - std::f32::consts::FRAC_PI_2) * Quat::from_rotation_x(pitch)
 }
 
+/// `P2GAME_CAM_AT="F:x,y,z,yaw,pitch;..."` (Unreal units, yaw/pitch in Unreal angle units): from
+/// script frame F on, the 3D camera is pinned there. Visual A/B tests take screenshots from the
+/// same viewpoints regardless of where the player walked.
+fn cam_override(sim: NonSend<Sim>, mut cams: Query<&mut Transform, (With<Camera3d>, Without<outdoor::SkyCamera>)>, mut steps: Local<Option<Vec<(u64, [f32; 5])>>>) {
+    let steps = steps.get_or_insert_with(|| {
+        std::env::var("P2GAME_CAM_AT")
+            .unwrap_or_default()
+            .split(';')
+            .filter_map(|s| {
+                let (f, v) = s.split_once(':')?;
+                let v: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                let f: u64 = f.trim().parse().ok()?;
+                (v.len() == 5).then(|| (f, [v[0], v[1], v[2], v[3], v[4]]))
+            })
+            .collect()
+    });
+    let Some((_, v)) = steps.iter().rev().find(|(f, _)| sim.frames >= *f) else { return };
+    let pos = scene::to_bevy([v[0], v[1], v[2]]);
+    let (yaw, pitch) = (v[3] * ROT, v[4] * ROT);
+    // Unreal yaw turns +X toward +Y; Bevy space maps Unreal (x, y, z) to (x, z, y).
+    let dir = Vec3::new(yaw.cos() * pitch.cos(), pitch.sin(), yaw.sin() * pitch.cos());
+    for mut tf in &mut cams {
+        *tf = Transform::from_translation(pos).looking_to(dir, Vec3::Y);
+    }
+}
+
 fn fly_camera(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -765,6 +1090,9 @@ fn report(
     {
         let mut ts = TRAVEL_START.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(t) = *ts {
+            if std::env::var_os("P2GAME_BOOT_TIMING").is_some() {
+                println!("load: travel frame {} took {:.1} ms ({:.2} s since travel)", sim.frames, time.delta_secs() * 1000.0, t.elapsed().as_secs_f32());
+            }
             if time.delta_secs() < 0.05 {
                 fr.smooth_travel += 1;
             } else {

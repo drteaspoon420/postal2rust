@@ -377,6 +377,11 @@ impl World {
         }
     }
 
+    /// Map export indices of the static mesh actors baked into this collision.
+    pub fn actor_exports(&self) -> std::collections::HashSet<u32> {
+        self.sources.iter().filter_map(|s| if let Source::Actor(e) = s { Some(*e) } else { None }).collect()
+    }
+
     fn is_removed(&self, export: u32) -> bool {
         self.removed.read().is_ok_and(|r| !r.is_empty() && r.contains(&export))
     }

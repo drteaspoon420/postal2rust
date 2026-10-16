@@ -2,19 +2,37 @@
 //  - BSP: diffuse * lightmap atlas (UV1), lightmap in modulate-2x gamma space (128 = 1.0).
 //  - Static meshes: diffuse * per-vertex baked light (vertex colour, already linear).
 // Dynamic lighting is skipped (it is baked in). Distance fog still applies.
+// Works in bindless mode (BakedLight index table at binding 100, slots 50/51) and in the
+// per-material bind group mode (P2VIEW_NO_BINDLESS=1 or no driver support).
 
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::{alpha_discard, main_pass_post_lighting_processing},
     forward_io::{VertexOutput, FragmentOutput},
     pbr_bindings,
+    mesh_bindings::mesh,
+}
+#import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d}
+
+#ifdef BINDLESS
+#import bevy_pbr::pbr_bindings::material_indices
+
+struct BakedLightIndices {
+    lightmap_texture: u32, // 50
+    lightmap_sampler: u32, // 51
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(100) var lightmap_texture: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101) var lightmap_sampler: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(100) var<storage> baked_light_indices: array<BakedLightIndices>;
+#else
+@group(#{MATERIAL_BIND_GROUP}) @binding(50) var lightmap_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(51) var lightmap_sampler: sampler;
+#endif
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+#ifdef BINDLESS
+    let slot = mesh[in.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
+#endif
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     var light = vec3<f32>(1.0);
 #ifdef VERTEX_COLORS
@@ -23,12 +41,29 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     light = in.color.rgb;
     var tex = vec4<f32>(1.0);
 #ifdef VERTEX_UVS_A
+#ifdef BINDLESS
+    tex = textureSampleBias(
+        bindless_textures_2d[material_indices[slot].base_color_texture],
+        bindless_samplers_filtering[material_indices[slot].base_color_sampler],
+        in.uv,
+        -0.5,
+    );
+#else
     tex = textureSampleBias(pbr_bindings::base_color_texture, pbr_bindings::base_color_sampler, in.uv, -0.5);
+#endif
 #endif
     pbr_input.material.base_color = vec4<f32>(tex.rgb, tex.a);
 #else
 #ifdef VERTEX_UVS_B
+#ifdef BINDLESS
+    let lm = textureSample(
+        bindless_textures_2d[baked_light_indices[slot].lightmap_texture],
+        bindless_samplers_filtering[baked_light_indices[slot].lightmap_sampler],
+        in.uv_b,
+    ).rgb;
+#else
     let lm = textureSample(lightmap_texture, lightmap_sampler, in.uv_b).rgb;
+#endif
     light = pow(lm * 2.0, vec3<f32>(2.2));
 #endif
 #endif

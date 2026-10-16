@@ -163,7 +163,7 @@ fn spawn_scene(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    let spawned = spawn::spawn_scene_with(commands, &mut data, spawn::SpawnOptions { unlit: args.unlit, baked: !args.dynamic }, images, meshes, materials);
+    let spawned = spawn::spawn_scene_with(commands, &mut data, spawn::SpawnOptions { unlit: args.unlit, baked: !args.dynamic, merge: false }, images, meshes, materials);
     let (fog_color, fog_falloff) = spawned.fog.unwrap_or((Color::srgb(0.55, 0.68, 0.85), FogFalloff::Linear { start: 250.0, end: 1400.0 }));
 
     let bounds = instance_bounds(&data);

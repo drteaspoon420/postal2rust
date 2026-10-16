@@ -22,6 +22,7 @@ pub mod level;
 pub mod navfix;
 pub mod physics;
 pub mod pkgindex;
+pub mod preload;
 pub mod ragdoll;
 pub mod save;
 pub mod subtitles;

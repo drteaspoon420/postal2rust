@@ -622,7 +622,39 @@ fn mirror_of(d: &ParticleEmitter) -> Mirror {
 
 /// Reads every field scripts are known to change from a ParticleEmitter sub-object.
 fn read_script_fields(vm: &Vm, o: ObjId, d: &mut ParticleEmitter) {
-    let g = |n: &str| vm.get_prop(o, n);
+    // Runs for every live emitter every frame. Name lookups dominated it, so remember, per class,
+    // the slot each call (in call order) resolved to. The entry also holds the name literal's
+    // address: a call whose name differs (code changed to a conditional read) falls back to the
+    // name lookup, so the memo can only ever skip work, never read the wrong field.
+    thread_local! {
+        static MEMO: RefCell<HashMap<usize, Vec<(usize, Option<usize>)>>> = RefCell::new(HashMap::new());
+    }
+    let Some(obj) = vm.objects.get(o) else { return };
+    let class = obj.class;
+    let mut memo = MEMO.with(|m| m.borrow_mut().remove(&class)).unwrap_or_default();
+    let mut i = 0usize;
+    let mut g = |n: &'static str| -> Option<&Value> {
+        let key = n.as_ptr() as usize;
+        let info = &vm.classes[class];
+        // A hit is confirmed by an exact (case-sensitive memcmp) name match on the slot, which
+        // also covers a VM reset reusing class ids for different classes.
+        let slot = match memo.get(i) {
+            Some(&(k, Some(s))) if k == key && info.slots.get(s).is_some_and(|x| x.name == n) => Some(s),
+            _ => {
+                let s = info.slot(n);
+                memo.truncate(i);
+                memo.push((key, s));
+                s
+            }
+        };
+        i += 1;
+        slot.and_then(|s| obj.slots.get(s))
+    };
+    read_script_fields_with(&mut g, d);
+    MEMO.with(|m| m.borrow_mut().insert(class, memo));
+}
+
+fn read_script_fields_with<'v>(g: &mut dyn FnMut(&'static str) -> Option<&'v Value>, d: &mut ParticleEmitter) {
     if let Some(r) = rv_of(g("StartVelocityRange")) {
         d.start_velocity_range = r;
     }

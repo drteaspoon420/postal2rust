@@ -54,12 +54,12 @@ enum P {
 
 /// Slot index of every [`PROPS`] name in one class (resolved once per class, so the per-frame
 /// pull/push does no name hashing).
-struct Slots(Vec<Option<usize>>);
+struct Slots(Vec<Option<usize>>, bool);
 
 impl Slots {
     fn new(vm: &Vm, class: ClassId) -> Slots {
         let c = &vm.classes[class];
-        Slots(PROPS.iter().map(|n| c.slot(n)).collect())
+        Slots(PROPS.iter().map(|n| c.slot(n)).collect(), vm.class_is_a(class, "PlayerController"))
     }
 }
 
@@ -114,6 +114,115 @@ pub struct VmBridge {
     /// called SetPhysics since (e.g. PlayDying's PHYS_KarmaRagDoll); push leaves it for the next
     /// pull instead of overwriting it with the physics actor's stale mode.
     pushed_physics: Rc<RefCell<HashMap<ObjId, u8>>>,
+    /// Sync points for skipping unchanged actors in `pull_dynamic`: per object, the slot write
+    /// generation and map epoch at which script state and the physics actor last agreed (after a
+    /// pull, carried forward by a push that found the object unchanged since that pull).
+    sync: Rc<RefCell<HashMap<ObjId, SyncPoint>>>,
+    /// Bumped whenever the object/physics actor maps change: `pull` resolves Base and Owner
+    /// through them, so a sync point is only valid within one epoch.
+    epoch: Rc<std::cell::Cell<u64>>,
+    /// (pulls skipped, verified skips, verify mismatches) for `P2GAME_SPIKES`/verify reports.
+    dirty_stats: Rc<std::cell::Cell<(u64, u64, u64)>>,
+}
+
+/// Where script and a physics actor last agreed: the object's slot write generation, the map
+/// epoch, and the physics-side state physics may change without pushing it (a sleeping pawn
+/// turning toward DesiredRotation moves no collider, and push_changed skips sleepers).
+#[derive(Clone, Copy, PartialEq)]
+struct SyncPoint {
+    wgen: u64,
+    epoch: u64,
+    location: Vec3,
+    rotation: [i32; 3],
+    velocity: Vec3,
+    physics: Physics,
+}
+
+impl SyncPoint {
+    fn new(wgen: u64, epoch: u64, a: &Actor) -> Self {
+        SyncPoint { wgen, epoch, location: a.location, rotation: a.rotation, velocity: a.velocity, physics: a.physics }
+    }
+}
+
+/// `P2GAME_NO_DIRTY=1`: `pull_dynamic` re-reads every actor every frame (the old path).
+fn dirty_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var_os("P2GAME_NO_DIRTY").is_some())
+}
+
+/// `P2GAME_DIRTY_VERIFY=1`: actors that would be skipped are pulled anyway, and any change the
+/// pull makes (to what it reads into the physics actor, Base/Owner links, the pushed Physics
+/// record) is reported as a mismatch: proof the skip changes nothing.
+fn dirty_verify() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("P2GAME_DIRTY_VERIFY").is_some())
+}
+
+/// Everything `pull` writes for one actor, for the verify comparison.
+#[derive(Debug, PartialEq)]
+struct PullImage {
+    location: Vec3,
+    rotation: [i32; 3],
+    velocity: Vec3,
+    acceleration: Vec3,
+    physics: Physics,
+    collision: (f32, f32),
+    flags: [bool; 14],
+    mass: f32,
+    buoyancy: f32,
+    rotation_rate: [i32; 3],
+    desired_rotation: [i32; 3],
+    spin_axis: Option<Vec3>,
+    base: Option<ActorId>,
+    owner: Option<ActorId>,
+    mover: Option<crate::actor::MoverInfo>,
+    pawn: Option<PawnInfo>,
+    pushed_physics: Option<u8>,
+}
+
+impl PullImage {
+    fn of(a: &Actor, pushed: Option<u8>) -> Self {
+        PullImage {
+            location: a.location,
+            rotation: a.rotation,
+            velocity: a.velocity,
+            acceleration: a.acceleration,
+            physics: a.physics,
+            collision: (a.collision_radius, a.collision_height),
+            flags: [
+                a.collide_actors,
+                a.collide_world,
+                a.block_actors,
+                a.block_players,
+                a.block_zero_extent,
+                a.block_nonzero_extent,
+                a.proj_target,
+                a.world_geometry,
+                a.is_static,
+                a.hidden,
+                a.bounce,
+                a.rotate_to_desired,
+                a.fixed_rotation_dir,
+                false,
+            ],
+            mass: a.mass,
+            buoyancy: a.buoyancy,
+            rotation_rate: a.rotation_rate,
+            desired_rotation: a.desired_rotation,
+            spin_axis: a.spin_axis,
+            base: a.base,
+            owner: a.owner,
+            mover: a.mover.clone(),
+            pawn: a.pawn.clone(),
+            pushed_physics: pushed,
+        }
+    }
+}
+
+/// `P2GAME_JUMP_TRACE` (read once: `pull` runs for every dynamic actor every frame).
+fn jump_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("P2GAME_JUMP_TRACE").is_some())
 }
 
 fn v3(v: Option<&Value>) -> Option<Vec3> {
@@ -148,6 +257,7 @@ impl VmBridge {
         self.to_phys.insert(obj, id);
         self.to_obj.insert(id, obj);
         self.order = None;
+        self.epoch.set(self.epoch.get() + 1);
     }
 
     /// Creates a cylinder physics actor for a VM actor from its current properties (pawns get
@@ -196,6 +306,7 @@ impl VmBridge {
         self.to_phys.insert(obj, id);
         self.to_obj.insert(id, obj);
         self.order = None;
+        self.epoch.set(self.epoch.get() + 1);
         id
     }
 
@@ -206,18 +317,26 @@ impl VmBridge {
             self.pushed_physics.borrow_mut().remove(&obj);
             world.remove(id);
             self.order = None;
+            self.epoch.set(self.epoch.get() + 1);
         }
     }
 
     /// The slot table of `obj`'s class (built on first use).
     fn slots_of(&self, vm: &Vm, obj: ObjId) -> Rc<Slots> {
-        let class = vm.objects[obj].class;
+        self.slots_of_class(vm, vm.objects[obj].class)
+    }
+
+    fn slots_of_class(&self, vm: &Vm, class: ClassId) -> Rc<Slots> {
         self.slots.borrow_mut().entry(class).or_insert_with(|| Rc::new(Slots::new(vm, class))).clone()
     }
 
     fn read_into(&self, vm: &Vm, obj: ObjId, a: &mut Actor) {
         let s = self.slots_of(vm, obj);
-        let o = Obj { slots: &vm.objects[obj].slots, s: &s };
+        self.read_into_with(vm, obj, a, &s);
+    }
+
+    fn read_into_with(&self, vm: &Vm, obj: ObjId, a: &mut Actor, s: &Slots) {
+        let o = Obj { slots: &vm.objects[obj].slots, s };
         a.location = o.v(P::Location).unwrap_or(a.location);
         a.rotation = o.rot(P::Rotation).unwrap_or(a.rotation);
         a.velocity = o.v(P::Velocity).unwrap_or(a.velocity);
@@ -297,7 +416,7 @@ impl VmBridge {
             p.is_walking = o.b(P::bIsWalking).unwrap_or(p.is_walking);
             p.wants_to_crouch = o.b(P::bWantsToCrouch).unwrap_or(p.wants_to_crouch);
             let ctrl = o.obj(P::Controller);
-            p.is_player = ctrl.is_some_and(|c| vm.class_is_a(vm.objects[c].class, "PlayerController"));
+            p.is_player = ctrl.is_some_and(|c| vm.objects.get(c).is_some_and(|co| self.slots_of_class(vm, co.class).1));
         }
     }
 
@@ -305,20 +424,22 @@ impl VmBridge {
     /// `Base` set by script (the VM's SetBase) is mirrored without events.
     pub fn pull(&mut self, vm: &Vm, world: &mut PhysWorld, obj: ObjId) {
         let Some(id) = self.phys(obj) else { return };
+        let s = self.slots_of(vm, obj);
         let (base, owner) = {
-            let s = self.slots_of(vm, obj);
             let o = Obj { slots: &vm.objects[obj].slots, s: &s };
             (o.obj(P::Base).and_then(|b| self.phys(b)), o.obj(P::Owner).and_then(|b| self.phys(b)))
         };
         let Some(a) = world.get_mut(id) else { return };
         let before = (a.location, a.rotation, a.collision_radius, a.collision_height);
         let (v_before, phys_before) = (a.velocity, a.physics);
-        self.read_into(vm, obj, a);
-        if std::env::var_os("P2GAME_JUMP_TRACE").is_some() && a.is_player() && a.physics == Physics::Falling && (phys_before != Physics::Falling || v_before.z != a.velocity.z) {
+        self.read_into_with(vm, obj, a, &s);
+        if jump_trace() && a.is_player() && a.physics == Physics::Falling && (phys_before != Physics::Falling || v_before.z != a.velocity.z) {
             println!("PULL {} phys {:?}->{:?} vz {:.0}->{:.0} stack {}", vm.object_name(obj), phys_before, a.physics, v_before.z, a.velocity.z, vm.call_stack_summary());
         }
         // Physics now matches script again (see `pushed_physics`).
         self.pushed_physics.borrow_mut().insert(obj, a.physics as u8);
+        // ... and so do all the fields read above: a sync point for `pull_dynamic`.
+        self.sync.borrow_mut().insert(obj, SyncPoint::new(vm.objects[obj].slots.generation(), self.epoch.get(), a));
         if base != Some(id) {
             a.base = base;
         }
@@ -331,6 +452,11 @@ impl VmBridge {
         if before != after {
             world.relink(id);
         }
+    }
+
+    /// (pulls skipped as unchanged, skips verified by a full pull, verify mismatches) so far.
+    pub fn dirty_stats(&self) -> (u64, u64, u64) {
+        self.dirty_stats.get()
     }
 
     /// Pulls every bound actor.
@@ -357,6 +483,32 @@ impl VmBridge {
         for &o in &order {
             let Some(id) = self.phys(o) else { continue };
             if world.get(id).is_some_and(|a| !a.is_static || a.is_mover()) && vm.objects.get(o).is_some_and(|x| !x.deleted) {
+                // No slot of the object written since script and physics last agreed (same map
+                // epoch): a pull would read back exactly what physics holds. Skip it.
+                let in_sync = !dirty_off()
+                    && world.get(id).is_some_and(|a| self.sync.borrow().get(&o) == Some(&SyncPoint::new(vm.objects[o].slots.generation(), self.epoch.get(), a)));
+                if in_sync {
+                    let mut st = self.dirty_stats.get();
+                    st.0 += 1;
+                    if !dirty_verify() {
+                        self.dirty_stats.set(st);
+                        continue;
+                    }
+                    let img = |w: &PhysWorld, b: &Self| w.get(id).map(|a| PullImage::of(a, b.pushed_physics.borrow().get(&o).copied()));
+                    let before = img(world, self);
+                    let m0 = world.moved_count();
+                    self.pull(vm, world, o);
+                    let after = img(world, self);
+                    st.1 += 1;
+                    if before != after || world.moved_count() != m0 {
+                        st.2 += 1;
+                        if st.2 <= 50 {
+                            println!("DIRTY_VERIFY MISMATCH {} ({o}) relinked {}\n  skip: {before:?}\n  pull: {after:?}", vm.object_name(o), world.moved_count() != m0);
+                        }
+                    }
+                    self.dirty_stats.set(st);
+                    continue;
+                }
                 self.pull(vm, world, o);
             }
         }
@@ -406,6 +558,7 @@ impl VmBridge {
                 println!("PUSHOVER {} script vz {sv:.0} phys {:?} vz {:.0} script phys {script_physics:?} stack {}", vm.object_name(obj), a.physics, a.velocity.z, vm.call_stack_summary());
             }
         }
+        let gen_before = vm.objects[obj].slots.generation();
         let slots = &mut vm.objects[obj].slots;
         let mut set = |p: P, v: Value| {
             if let Some(slot) = s.0[p as usize].and_then(|i| slots.get_mut(i)) {
@@ -442,6 +595,13 @@ impl VmBridge {
             set(P::PrevKeyNum, Value::Byte(m.prev_key_num));
             set(P::PhysAlpha, Value::Float(m.phys_alpha));
             set(P::bInterpolating, Value::Bool(m.interpolating));
+        }
+        // Script had not written the object since it was last in sync with physics, and push only
+        // copied physics' own values into it: the two still agree at the new generation.
+        let g = vm.objects[obj].slots.generation();
+        let epoch = self.epoch.get();
+        if let Some(e) = self.sync.borrow_mut().get_mut(&obj).filter(|e| (e.wgen, e.epoch) == (gen_before, epoch)) {
+            *e = SyncPoint::new(g, epoch, a);
         }
     }
 

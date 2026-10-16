@@ -90,7 +90,15 @@ pub struct LoadStats {
 
 /// Builds the package for the current level of `game`.
 pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) {
+    write_save_with(game, slot_name, std::env::var_os("P2GAME_SAVE_NO_CACHE").is_none())
+}
+
+/// [`write_save`] with the resource lookup cache on or off (same bytes either way).
+pub fn write_save_with(game: &Game, slot_name: &str, use_cache: bool) -> (Vec<u8>, String, SaveStats) {
     let vm = &game.world.vm;
+    let lap0 = std::time::Instant::now();
+    let mut res_cache: HashMap<String, i32> = HashMap::new();
+    let mut pkg_index: HashMap<String, Option<PkgIndex>> = HashMap::new();
     let mut st = SaveStats::default();
     let mut w = PackageWriter::new();
     let mut sidecar = String::new();
@@ -125,6 +133,7 @@ pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) 
         }
         k += 1;
     }
+    let lap_order = lap0.elapsed();
     // Names must be unique per outer; make them so (spawned actors share class-based names).
     let mut used: HashSet<String> = HashSet::new();
     let mut names: HashMap<ObjId, String> = HashMap::new();
@@ -142,6 +151,7 @@ pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) 
         }
         names.insert(o, n);
     }
+    let lap_names = lap0.elapsed();
     // Exports (indices fixed before properties so references can be written).
     let mut export_of: HashMap<ObjId, usize> = HashMap::new();
     let level_ref = xlevel.map(|x| ObjRef::Export(order.iter().position(|&o| o == x).unwrap()));
@@ -154,6 +164,7 @@ pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) 
         let ObjRef::Export(i) = e else { unreachable!() };
         export_of.insert(o, i);
     }
+    let lap_exports = lap0.elapsed();
     // Data.
     for &o in &order {
         let i = export_of[&o];
@@ -190,7 +201,7 @@ pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) 
                 sidecar += &format!("disabled {} {}\n", names[&o], ob.exec.disabled);
             }
         }
-        let mut cx = WCx { vm, names: &names, export_of: &export_of, w: &mut w, game };
+        let mut cx = WCx { vm, names: &names, export_of: &export_of, w: &mut w, game, res_cache: use_cache.then_some(&mut res_cache), pkg_index: &mut pkg_index };
         st.properties += cx.properties(o, &mut out);
         write_none(cx.w, &mut out);
         w.set_data(i, out.0, flags);
@@ -200,9 +211,19 @@ pub fn write_save(game: &Game, slot_name: &str) -> (Vec<u8>, String, SaveStats) 
         }
     }
     sidecar += &format!("slot_name={slot_name}\n");
+    let lap_data = lap0.elapsed();
     let bytes = w.finish();
+    if std::env::var_os("P2GAME_BOOT_TIMING").is_some() {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        eprintln!("save build: order {:.1}, names {:.1}, exports {:.1}, data {:.1}, finish {:.1} ms; {} resource lookups {:.1} ms", ms(lap_order), ms(lap_names - lap_order), ms(lap_exports - lap_names), ms(lap_data - lap_exports), ms(lap0.elapsed() - lap_data), RES_N.with(|c| c.replace(0)), RES_NS.with(|c| c.replace(0)) as f64 / 1e6);
+    }
     st.bytes = bytes.len();
     (bytes, sidecar, st)
+}
+
+thread_local! {
+    static RES_NS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static RES_N: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn collect_refs(v: &Value, out: &mut Vec<ObjId>) {
@@ -265,6 +286,72 @@ struct WCx<'a> {
     export_of: &'a HashMap<ObjId, usize>,
     w: &'a mut PackageWriter,
     game: &'a Game,
+    /// Resource path -> raw import ref, per save (`resolve_path` scans the whole package). `None`
+    /// when disabled (`P2GAME_SAVE_NO_CACHE`). Imports are deduplicated, so this cannot change the
+    /// bytes written.
+    res_cache: Option<&'a mut HashMap<String, i32>>,
+    /// Per package: lowercase export name -> export indices in table order (for [`resolve_indexed`]).
+    pkg_index: &'a mut HashMap<String, Option<PkgIndex>>,
+}
+
+type PkgIndex = (std::sync::Arc<Package>, HashMap<String, Vec<usize>>);
+
+/// `host::resolve_path(lib, path, None)` through a name index: the same candidates in the same
+/// order, so the same result, without scanning every export per lookup.
+fn resolve_indexed(lib: &upkg::library::Library, index: &mut HashMap<String, Option<PkgIndex>>, path: &str) -> Option<(String, String)> {
+    // Package contents never change for a path, so the answer is kept across saves.
+    if let Some(r) = CLASS_OF.with(|c| c.borrow().get(path).cloned()) {
+        return r;
+    }
+    let r = resolve_indexed_uncached(lib, index, path);
+    CLASS_OF.with(|c| c.borrow_mut().insert(path.to_string(), r.clone()));
+    r
+}
+
+thread_local! {
+    /// Resource path -> (class, class package) as [`resolve_indexed`] found it.
+    static CLASS_OF: std::cell::RefCell<HashMap<String, Option<(String, String)>>> = std::cell::RefCell::new(HashMap::new());
+}
+
+fn resolve_indexed_uncached(lib: &upkg::library::Library, index: &mut HashMap<String, Option<PkgIndex>>, path: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = path.split('.').collect();
+    let (pkg_name, rest) = parts.split_first()?;
+    let leaf = rest.last()?;
+    let groups: Vec<&str> = rest[..rest.len() - 1].iter().rev().copied().collect();
+    let entry = index.entry(pkg_name.to_ascii_lowercase()).or_insert_with(|| {
+        lib.package(pkg_name).map(|pkg| {
+            let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+            for (i, e) in pkg.exports.iter().enumerate() {
+                by_name.entry(pkg.name(e.name).to_ascii_lowercase()).or_default().push(i);
+            }
+            (pkg, by_name)
+        })
+    });
+    let (pkg, by_name) = entry.as_ref()?;
+    let cands = by_name.get(&leaf.to_ascii_lowercase())?;
+    let mut fallback = None;
+    for &i in cands {
+        let mut outer = pkg.exports[i].outer;
+        let mut ok = true;
+        for g in &groups {
+            match outer {
+                ObjRef::Export(o) if pkg.name(pkg.exports[o].name).eq_ignore_ascii_case(g) => outer = pkg.exports[o].outer,
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && outer == ObjRef::Null {
+            fallback = Some(i);
+            break;
+        }
+        fallback.get_or_insert(i);
+    }
+    let i = fallback?;
+    let cn = pkg.export_class(i).to_string();
+    let cp = class_package_of(&cn);
+    Some((cn, cp))
 }
 
 impl WCx<'_> {
@@ -319,8 +406,29 @@ impl WCx<'_> {
     }
 
     fn resource_ref(&mut self, path: &str) -> i32 {
+        if let Some(&r) = self.res_cache.as_ref().and_then(|c| c.get(path)) {
+            return r;
+        }
+        let r = {
+            let t = std::time::Instant::now();
+            let r = self.resource_ref_uncached(path);
+            RES_NS.with(|c| c.set(c.get() + t.elapsed().as_nanos() as u64));
+            RES_N.with(|c| c.set(c.get() + 1));
+            r
+        };
+        if let Some(c) = self.res_cache.as_mut() {
+            c.insert(path.to_string(), r);
+        }
+        r
+    }
+
+    fn resource_ref_uncached(&mut self, path: &str) -> i32 {
         // Class of the asset from the content library's package table.
-        let class = crate::host::resolve_path(&self.game.host.lib, path, None).map(|o| (o.pkg.export_class(o.export).to_string(), class_package_of(o.pkg.export_class(o.export))));
+        let class = if self.res_cache.is_some() {
+            resolve_indexed(&self.game.host.lib, self.pkg_index, path)
+        } else {
+            crate::host::resolve_path(&self.game.host.lib, path, None).map(|o| (o.pkg.export_class(o.export).to_string(), class_package_of(o.pkg.export_class(o.export))))
+        };
         match class {
             Some((cn, cp)) => raw_ref(self.w.import_path(path, &cp, &cn)),
             None => raw_ref(self.w.import_path(path, "Engine", "Texture")),
@@ -750,12 +858,23 @@ fn install_loaded_level(game: &mut Game, lv: Level, map_pkg: Option<std::sync::A
 
 /// Saves the current level into `slot` of `dir` (package + sidecar + slot ini line).
 pub fn save_slot(game: &Game, dir: &Path, slot: i32, slot_name: &str) -> std::io::Result<SaveStats> {
+    let t0 = std::time::Instant::now();
     std::fs::create_dir_all(dir)?;
     let (bytes, sidecar, st) = write_save(game, slot_name);
+    let t1 = t0.elapsed();
+    if std::env::var_os("P2GAME_SAVE_VERIFY").is_some() {
+        // Rebuild without the lookup cache and compare (byte-identical check).
+        let (b2, s2, _) = write_save_with(game, slot_name, false);
+        eprintln!("save verify: package {} ({} vs {} bytes), sidecar {}", if b2 == bytes { "IDENTICAL" } else { "DIFFERENT" }, bytes.len(), b2.len(), if s2 == sidecar { "IDENTICAL" } else { "DIFFERENT" });
+    }
     let path = slot_path(dir, slot);
     std::fs::write(&path, bytes)?;
     std::fs::write(path.with_extension("p2r"), sidecar)?;
+    let t2 = t0.elapsed();
     write_slot_info(dir, slot, slot_name, game);
+    if std::env::var_os("P2GAME_BOOT_TIMING").is_some() {
+        eprintln!("save timing: build {:.1} ms, write {:.1} ms, slot info {:.1} ms", t1.as_secs_f64() * 1e3, (t2 - t1).as_secs_f64() * 1e3, (t0.elapsed() - t2).as_secs_f64() * 1e3);
+    }
     Ok(st)
 }
 
@@ -834,9 +953,67 @@ thread_local! {
 /// Installs the console commands (`SaveGame N`, `LoadGame N`, `CHECKSAVEGAME N`) for every level.
 pub fn install(dir: Option<PathBuf>) {
     SAVE_DIR.with(|d| *d.borrow_mut() = Some(dir.unwrap_or_else(user_save_dir)));
-    crate::host::register_level_hook(|host, _vm| {
+    crate::host::register_level_hook(|host, vm| {
         host.ext.borrow_mut().push(Rc::new(SaveHost));
+        // Class defaults name what BeginPlay will spawn (pawn dialog packages); the first frame
+        // adds what the live objects reference by then.
+        if std::env::var_os("P2GAME_SAVE_NO_WARM").is_none() {
+            warm_packages(&host.lib, vm, true);
+            let lib = host.lib.clone();
+            let mut done = false;
+            host.add_frame_hook("save_warm", move |vm, _dt| {
+                if !done {
+                    done = true;
+                    warm_packages(&lib, vm, false);
+                }
+            });
+        }
     });
+}
+
+/// Opens (on a worker thread) every package the live actors' resource properties point into, so
+/// the arrival autosave does not open them cold on the game thread (dialog packages, ~0.3 s in
+/// total on suburbs-1). Only fills the library's package cache (`Library::package` is the same
+/// call the save makes, same result). `P2GAME_SAVE_NO_WARM=1` turns it off.
+fn warm_packages(lib: &std::sync::Arc<upkg::library::Library>, vm: &Vm, class_defaults: bool) {
+    let mut pkgs: HashSet<String> = HashSet::new();
+    fn walk(v: &Value, out: &mut HashSet<String>) {
+        match v {
+            Value::Resource(p) => {
+                if let Some(pk) = p.split('.').next().filter(|s| !s.is_empty()) {
+                    out.insert(pk.to_ascii_lowercase());
+                }
+            }
+            Value::Struct(f) => f.iter().for_each(|(_, v)| walk(v, out)),
+            Value::Array(a) => a.iter().for_each(|v| walk(v, out)),
+            _ => {}
+        }
+    }
+    for o in &vm.objects {
+        if !o.deleted {
+            o.slots.iter().for_each(|v| walk(v, &mut pkgs));
+        }
+    }
+    if class_defaults {
+        for c in &vm.classes {
+            c.defaults.iter().for_each(|v| walk(v, &mut pkgs));
+        }
+    }
+    let lib = lib.clone();
+    let mut pkgs: Vec<String> = pkgs.into_iter().collect();
+    pkgs.sort();
+    std::thread::Builder::new()
+        .name("save-warm".into())
+        .spawn(move || {
+            let t = std::time::Instant::now();
+            for p in &pkgs {
+                lib.package(p);
+            }
+            if std::env::var_os("P2GAME_BOOT_TIMING").is_some() {
+                eprintln!("save warm: {} packages in {:.0} ms", pkgs.len(), t.elapsed().as_secs_f64() * 1e3);
+            }
+        })
+        .ok();
 }
 
 pub fn save_dir() -> PathBuf {

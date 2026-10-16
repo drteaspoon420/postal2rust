@@ -27,10 +27,16 @@ impl Plugin for BakedPlugin {
     }
 }
 
+/// Bindless (shares slabs with StandardMaterial) so the ~900 baked materials of a town map can
+/// be drawn as a few multi-draw batches instead of one bind group + draw each. The binding
+/// numbers double as the bindless index table slots (50..52, table at binding 100), clear of
+/// StandardMaterial's 0..31. `P2VIEW_NO_BINDLESS=1` (p2game: disables texture binding arrays)
+/// forces the old per-material bind groups for A/B.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bindless(index_table(range(50..52), binding(100)))]
 pub struct BakedLight {
-    #[texture(100)]
-    #[sampler(101)]
+    #[texture(50)]
+    #[sampler(51)]
     pub lightmap: Handle<Image>,
 }
 
@@ -75,6 +81,9 @@ pub fn vertex_light(c: [u8; 4], ambient: [f32; 3]) -> [f32; 4] {
 pub struct BakedBatch {
     pub mesh: Handle<Mesh>,
     pub base: StandardMaterial,
+    /// Scene material index: batches with the same material and lightmap share one asset, so
+    /// Bevy can batch their draws (a material per batch made ~1000 unbatchable BSP draws).
+    pub material: u32,
     pub lightmap: u32,
     pub uv_anim: Option<crate::uvanim::UvAnim>,
     pub tex_anim: Option<crate::uvanim::TexAnim>,
@@ -84,9 +93,10 @@ pub struct BakedBatch {
 /// Queues spawning of lightmapped BSP batches (needs the baked material asset type).
 pub fn spawn_baked_world(commands: &mut Commands, batches: Vec<BakedBatch>, lightmaps: Vec<Handle<Image>>) {
     commands.queue(move |world: &mut World| {
+        let mut mats: std::collections::HashMap<(u32, u32), Handle<BakedMaterial>> = Default::default();
         for b in batches {
             let lm = lightmaps[b.lightmap as usize].clone();
-            let mat = world.resource_mut::<Assets<BakedMaterial>>().add(BakedMaterial { base: b.base, extension: BakedLight { lightmap: lm } });
+            let mat = mats.entry((b.material, b.lightmap)).or_insert_with(|| world.resource_mut::<Assets<BakedMaterial>>().add(BakedMaterial { base: b.base, extension: BakedLight { lightmap: lm } })).clone();
             let mut e = world.spawn((Mesh3d(b.mesh), MeshMaterial3d(mat), Transform::IDENTITY));
             if let Some(a) = b.uv_anim {
                 e.insert(a);

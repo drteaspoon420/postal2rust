@@ -339,7 +339,7 @@ fn goto_hook(host: &GameHost, _vm: &mut Vm) {
             next.set(next.get() + 1);
             let pawn = crate::ai::local_player_controller(vm).and_then(|c| vm.get_prop(c, "Pawn")).and_then(|v| v.as_obj());
             // `X,Y,Z` targets a point instead of an actor.
-            let point: Option<[f32; 3]> = key.split(',').map(|s| s.trim().parse::<f32>().ok()).collect::<Option<Vec<f32>>>().and_then(|v| v.try_into().ok());
+            let point: Option<[f32; 3]> = key.split(',').map(|s| s.trim().parse::<f32>().ok()).collect::<Option<Vec<f32>>>().and_then(|v| v.get(..3).filter(|_| v.len() <= 4).and_then(|s| s.try_into().ok()));
             let (Some(pawn), Some(l)) = (pawn, point.or_else(|| find_actor(vm, key).map(|x| vm.actor_loc(x)))) else {
                 println!("demo goto {key}: no player pawn or target");
                 continue;
@@ -349,6 +349,11 @@ fn goto_hook(host: &GameHost, _vm: &mut Vm) {
             // On the target if there is room, else on a ring around it (pickups sit against shelves).
             let spots = std::iter::once((0.0, 0.0)).chain((1..=3).flat_map(|r| (0..8).map(move |k| (r as f32 * 25.0, k as f32 * std::f32::consts::FRAC_PI_4))));
             let ok = spots.flat_map(|(r, a)| (0..4).map(move |k| [l[0] + r * a.cos(), l[1] + r * a.sin(), l[2] + 15.0 * k as f32])).any(|p| uscript::host::Host::move_actor(host, vm, pawn, p, false));
+            // `X,Y,Z,YAW`: also set the view yaw (Unreal units).
+            let nums: Vec<f32> = key.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            if let (4, Some(c)) = (nums.len(), crate::ai::local_player_controller(vm)) {
+                vm.set_prop(c, "Rotation", Value::Rotator([0, nums[3] as i32, 0]));
+            }
             println!("demo goto {key}: at {l:?} -> {ok}");
         }
     }));

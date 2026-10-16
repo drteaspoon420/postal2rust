@@ -98,10 +98,10 @@ Known differences from the original, roughly by impact:
 **Gameplay and AI**
 - NPC pathfinding handles stairs and blocked spots much better, but busy queues (the EastMall food court) can still jostle.
 - Some pawns use poses or idle animations that differ from the original.
-- Wandering NPCs can cause a short hitch when they pick a new random destination.
+- Wandering NPCs picking a new random destination now cost about 1 ms instead of 3-14 ms; small hitches can remain right after arriving on a map.
 
 **Rendering**
-- Lighting, sky and fog colours differ: outdoor maps look brighter and cooler than the original's warm haze; some night and interior maps (MilitaryBase cells, VincesHouse sky) are off.
+- Lighting, sky and fog colours still differ in places. Night maps, MilitaryBase cells, VincesHouse glass, EasterArena grass and the suburbs trailer were brought closer to the original in v0.3.0; the MilitaryBase cell mattresses still look like a lattice instead of a solid sheet.
 - Explosions and the grenade blast look different (yellow-grey cloud instead of an orange flash with brown smoke); tracers are unchecked.
 - A few missing details (e.g. the US flag poster in the police station).
 

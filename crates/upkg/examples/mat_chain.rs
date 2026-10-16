@@ -24,7 +24,8 @@ fn chain(lib: &Library, o: &Obj, depth: usize) {
                 let n = (px.len() / 4).max(1);
                 let a: Vec<u8> = px.chunks(4).map(|c| c[3]).collect();
                 let lum: u64 = px.chunks(4).map(|c| (c[0] as u64 + c[1] as u64 + c[2] as u64) / 3).sum();
-                extra = format!(" fmt {:?} alpha0 {:.0}% alpha255 {:.0}% mean_lum {}", t.format, 100.0 * a.iter().filter(|&&x| x < 8).count() as f32 / n as f32, 100.0 * a.iter().filter(|&&x| x > 247).count() as f32 / n as f32, lum / n as u64);
+                let amean: u64 = a.iter().map(|&x| x as u64).sum::<u64>() / n as u64;
+                extra = format!(" fmt {:?} alpha0 {:.0}% alpha255 {:.0}% mean_alpha {amean} mean_lum {}", t.format, 100.0 * a.iter().filter(|&&x| x < 8).count() as f32 / n as f32, 100.0 * a.iter().filter(|&&x| x > 247).count() as f32 / n as f32, lum / n as u64);
             }
         }
     }

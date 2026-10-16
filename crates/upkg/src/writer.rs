@@ -137,6 +137,8 @@ pub struct ExportEntry {
 pub struct PackageWriter {
     names: Vec<String>,
     name_index: HashMap<String, usize>,
+    /// Exact spelling -> index (fast path of [`PackageWriter::name`]).
+    name_exact: HashMap<String, usize>,
     imports: Vec<ImportEntry>,
     import_index: HashMap<(String, String, i32, String), usize>,
     pub exports: Vec<ExportEntry>,
@@ -152,13 +154,20 @@ impl PackageWriter {
 
     /// Index of a name (case-insensitive, first spelling kept), adding it if needed.
     pub fn name(&mut self, s: &str) -> usize {
+        // Fast path: a spelling already seen (no lowercase allocation). Same index as the
+        // case-insensitive lookup below would return.
+        if let Some(&i) = self.name_exact.get(s) {
+            return i;
+        }
         let k = s.to_ascii_lowercase();
         if let Some(&i) = self.name_index.get(&k) {
+            self.name_exact.insert(s.to_string(), i);
             return i;
         }
         let i = self.names.len();
         self.names.push(s.to_string());
         self.name_index.insert(k, i);
+        self.name_exact.insert(s.to_string(), i);
         i
     }
 

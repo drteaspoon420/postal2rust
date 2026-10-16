@@ -147,7 +147,19 @@ fn exec_hook(mut sim: NonSendMut<Sim>, mut frame: Local<u32>, mut last: Local<St
             }
         }
     }
-    if std::env::var("P2GAME_EXIT").ok().and_then(|s| s.parse::<u32>().ok()) == Some(f) {
+    // Scripted runs always end: at or after frame P2GAME_EXIT, and after P2GAME_EXIT_SECS of wall
+    // time (default 120 s whenever P2GAME_SHOTS or P2GAME_EXIT is set) so a run whose frame count
+    // stalls (loading, a paused map screen) never leaves the window open.
+    let exit_frame = std::env::var("P2GAME_EXIT").ok().and_then(|s| s.trim().parse::<u32>().ok());
+    let automated = exit_frame.is_some() || std::env::var_os("P2GAME_SHOTS").is_some();
+    let limit = std::env::var("P2GAME_EXIT_SECS").ok().and_then(|s| s.trim().parse::<f32>().ok()).or(automated.then_some(120.0));
+    static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let started = *STARTED.get_or_init(std::time::Instant::now);
+    let over_time = limit.is_some_and(|l| started.elapsed().as_secs_f32() > l);
+    if exit_frame.is_some_and(|e| f >= e) || over_time {
+        if over_time {
+            println!("EXIT: wall-time limit {:.0} s reached at frame {f}", limit.unwrap_or(0.0));
+        }
         exit.write(AppExit::Success);
     }
     let Some(pc) = sim.game.player_controller else { return };
@@ -660,7 +672,7 @@ fn canvas_meshes(
                 Some(Value::Array(s)) => s.iter().map(|v| v.as_resource().and_then(|p| resolve_path(lib, p, None))).collect(),
                 _ => Vec::new(),
             };
-            let darken = canvas_darken(lib, path);
+            let darken = canvas_darken(lib, path, skins.first().and_then(|s| s.as_ref()));
             let es: Vec<Entity> = st
                 .meshes
                 .sections(lib, path, &skins, &mut meshes, &mut materials, &mut images)
@@ -707,11 +719,17 @@ fn canvas_meshes(
 }
 
 /// True if the static mesh's first material is a Shader with OutputBlending OB_Darken (6).
-fn canvas_darken(lib: &upkg::library::Library, path: &str) -> bool {
+fn canvas_darken(lib: &upkg::library::Library, path: &str, skin0: Option<&upkg::library::Obj>) -> bool {
     (|| {
         let o = resolve_path(lib, path, Some("StaticMesh"))?;
         let sm = upkg::staticmesh::read_static_mesh(&o.pkg, o.export).ok()?;
-        let m = sm.materials.first().and_then(|r| lib.resolve(&o.pkg, *r))?;
+        // Skins[0] overrides the mesh's material. NewsScreen's paper is a NewspaperBox skinned
+        // with the day's plain newspaper texture; judging by the mesh's own (OB_Darken) shader
+        // drew it inverted and multiplied: dark and see-through.
+        let m = match skin0 {
+            Some(s) => s.clone(),
+            None => sm.materials.first().and_then(|r| lib.resolve(&o.pkg, *r))?,
+        };
         Some(m.class().eq_ignore_ascii_case("Shader") && upkg::begin_object(&m.pkg, m.export).ok()?.1.byte("OutputBlending") == Some(6))
     })()
     .unwrap_or(false)
@@ -750,6 +768,21 @@ struct FpState {
 /// True if the level sun reaches the eye at `eye` (Unreal units): nothing solid on a line toward
 /// the sun. `dir` is the Bevy light's forward (the direction it shines).
 fn sun_reaches(eye: [f32; 3], dir: Vec3) -> bool {
+    // A 20000 uu level trace every frame was ~6% of the main thread. The answer only changes when
+    // the eye or the sun moves: reuse it while the eye stays within 24 uu (~0.5 m, a few frames
+    // of running) and the sun is unchanged; only the lit/shaded choice is cached.
+    thread_local!(static LAST: std::cell::Cell<Option<([f32; 3], Vec3, bool)>> = const { std::cell::Cell::new(None) });
+    if let Some((e, d, r)) = LAST.with(|l| l.get()) {
+        if d == dir && (Vec3::from(e) - Vec3::from(eye)).length_squared() < 24.0 * 24.0 {
+            return r;
+        }
+    }
+    let r = sun_reaches_uncached(eye, dir);
+    LAST.with(|l| l.set(Some((eye, dir, r))));
+    r
+}
+
+fn sun_reaches_uncached(eye: [f32; 3], dir: Vec3) -> bool {
     let Some(w) = p2game::physics::level_collision() else { return true };
     // Bevy (x, y up, z) -> Unreal (x, z, y).
     let to_sun = Vec3::new(-dir.x, -dir.z, -dir.y).normalize_or_zero();
@@ -826,6 +859,8 @@ fn fp_weapon(
             // key light that only this layer sees.
             AmbientLight { color: Color::WHITE, brightness: fp_ambient(), affects_lightmapped_meshes: true },
             FpCamera,
+            // No point/spot lights on this layer: one light cluster (P2VIEW_OVERLAY_CLUSTERS=grid restores Bevy's default grid).
+            p2view::outdoor::overlay_cluster_config(),
         ));
         commands.spawn((
             DirectionalLight { illuminance: fp_key(), shadow_maps_enabled: false, ..default() },

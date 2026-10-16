@@ -332,7 +332,9 @@ impl Game {
         let (map, portal) = map.split_once('#').unwrap_or((map, ""));
         self.portal = portal.to_string();
         let stem = std::path::Path::new(map).file_stem().and_then(|s| s.to_str()).unwrap_or(map).to_string();
+        let t0 = std::time::Instant::now();
         let Some(pkg) = self.world.files.path(&stem).and_then(|p| upkg::Package::open(p).ok()) else { return false };
+        boot_lap(t0, "travel: package opened");
         // The local player's pawn and inventory travel with them (GameState, errand items, money).
         let carry = crate::travel::capture(&self.world.vm, self.player_controller);
         let vm = &mut self.world.vm;
@@ -341,14 +343,18 @@ impl Game {
         vm.actors.clear();
         vm.level = None;
         vm.log.clear();
+        boot_lap(t0, "travel: old level dropped");
         let pkg = std::sync::Arc::new(pkg);
         crate::physics::prefetch(self.world.library(), pkg.clone());
         self.level = self.world.load_level(pkg);
+        boot_lap(t0, "travel: level instantiated");
         let game_opt = url_option(options, "Game");
         self.setup(game_opt.as_deref());
+        boot_lap(t0, "travel: setup");
         self.begin_play(options);
         let host = self.host.clone();
         crate::travel::restore(&mut self.world.vm, &host, self.player_controller, carry);
+        boot_lap(t0, "travel: begin play + restore");
         true
     }
 }

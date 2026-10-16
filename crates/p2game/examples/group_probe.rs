@@ -7,6 +7,7 @@ use p2game::config::BootConfig;
 use p2game::level::World;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use uscript::host::Host;
 use uscript::vm::Value;
 
 fn main() {
@@ -21,9 +22,26 @@ fn main() {
     let lv = world.load_level(Arc::new(upkg::Package::open(path).unwrap()));
     let game_class = get("--game").unwrap_or_else(|| "GameTypes.GameSinglePlayer".into());
     let mut game = Game::new(world, lv, Some(&game_class));
-    game.begin_play("");
+    // `--day N` (1 = Monday): the original's SetDay option (InitGame -> ForceDayOnStartup).
+    let day = get("--day").unwrap_or_else(|| "1".into());
+    game.begin_play(&format!("?SetDay={day}"));
+    // TravelPostAccept creates the GameState and starts the day (as the front end does).
+    if let Some(pc) = game.player_controller {
+        game.world.vm.fire_event(pc, "TravelPostAccept", vec![]);
+    }
     for _ in 0..10 {
         game.tick(1.0 / 30.0);
+    }
+    // `--via URL`: reach the map by travel from the first one (as a new game does: intro -> suburbs-3).
+    if let Some(url) = get("--via") {
+        let host = game.host.clone();
+        host.console_command(&mut game.world.vm, None, &format!("open {url}"));
+        let (m, opts) = game.take_travel().expect("travel was not recorded");
+        assert!(game.travel(&m, &opts), "travel failed");
+        for _ in 0..30 {
+            game.tick(1.0 / 30.0);
+        }
+        println!("travelled to {} ({})", game.level.map.name, game.game_class);
     }
     let vm = &game.world.vm;
     let gi = vm.actors.iter().copied().find(|&x| !vm.objects[x].deleted && vm.class_is_a(vm.objects[x].class, "P2GameInfoSingle"));
@@ -60,10 +78,11 @@ fn main() {
             }
         }
     }
+    let today = format!("DAY_{}", (b'A' + day.parse::<u8>().unwrap_or(1).saturating_sub(1)) as char);
     let mut wrong = 0;
     for (g, (alive, dead, ex)) in &groups {
         let days: Vec<&str> = g.split(',').filter(|t| t.starts_with("DAY_")).collect();
-        if *alive > 0 && !days.is_empty() && !days.contains(&"DAY_A") {
+        if *alive > 0 && !days.is_empty() && !days.contains(&today.as_str()) {
             wrong += alive;
             println!("WRONGDAY {g:40} alive {alive:4} destroyed {dead:4} {}", ex.join(" "));
         }
@@ -71,6 +90,33 @@ fn main() {
     println!("wrong-day alive total: {wrong}");
     for (g, (alive, dead, ex)) in groups {
         println!("{g:40} alive {alive:4} destroyed {dead:4} {}", ex.join(" "));
+    }
+    if let Some(pat) = get("--mesh") {
+        let pat = pat.to_ascii_lowercase();
+        for o in 0..vm.objects.len() {
+            if vm.classes[vm.objects[o].class].slot("StaticMesh").is_none() {
+                continue;
+            }
+            let p = |k: &str| vm.get_prop(o, k).map(|v| vm.value_string(v)).unwrap_or_default();
+            let (mesh, skin) = (p("StaticMesh"), p("Skins"));
+            if mesh.to_ascii_lowercase().contains(&pat) || skin.to_ascii_lowercase().contains(&pat) || vm.object_name(o).to_ascii_lowercase().contains(&pat) {
+                println!("MESH {} deleted {} bHidden {} Group {} Tag {} Event {} StaticMesh {} Skins {} Loc {} Rot {}", vm.object_name(o), vm.objects[o].deleted, p("bHidden"), p("Group"), p("Tag"), p("Event"), mesh, skin, p("Location"), p("Rotation"));
+            }
+        }
+    }
+    // `--group PATTERN`: every object (live or destroyed) whose Group contains PATTERN, with its class.
+    if let Some(pat) = get("--group") {
+        let pat = pat.to_ascii_uppercase();
+        for o in 0..vm.objects.len() {
+            if vm.classes[vm.objects[o].class].slot("Group").is_none() {
+                continue;
+            }
+            let g = vm.get_prop(o, "Group").map(|v| v.as_name()).unwrap_or_default();
+            if g.to_ascii_uppercase().contains(&pat) {
+                let p = |k: &str| vm.get_prop(o, k).map(|v| vm.value_string(v)).unwrap_or_default();
+                println!("GROUP {} class {} deleted {} Group {} StaticMesh {} Texture {} ProjTexture {} Location {}", vm.object_name(o), vm.classes[vm.objects[o].class].name, vm.objects[o].deleted, g, p("StaticMesh"), p("Texture"), p("ProjTexture"), p("Location"));
+            }
+        }
     }
     if let Some(names) = get("--show") {
         for n in names.split(',') {

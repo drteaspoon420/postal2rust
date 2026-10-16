@@ -28,3 +28,17 @@ inherits = "release"
 incremental = false
 lto = "fat"
 codegen-units = 1
+
+# Playtest build (tools\qa\build_wt.bat -> target-qa\qa\p2game.exe): non-incremental, thin LTO.
+# Same code as release, just better optimized (cross-crate inlining into the VM / physics hot loops).
+[profile.qa]
+inherits = "release"
+incremental = false
+lto = "thin"
+codegen-units = 16
+
+# Sampling profiler builds (samply): release code with line tables for symbolication.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+incremental = false

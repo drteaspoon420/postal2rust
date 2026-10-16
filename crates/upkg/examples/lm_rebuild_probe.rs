@@ -37,11 +37,19 @@ fn main() {
     };
     let (mut so, mut sr, mut soo, mut srr, mut sor, mut n) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
     let mut hist = [0u32; 8];
+    let mut cls = [(0f64, 0f64, 0f64); 3];
     for (ti, t) in m.light_map_textures.iter().enumerate() {
         let Some(d) = t.mips.first() else { continue };
         let Ok(saved) = decode_raw(TexFormat::from_byte(t.format), d, t.width, t.height) else { continue };
         let mut mine = vec![0u8; saved.len()];
         for lm in m.light_maps.iter().filter(|l| l.texture == ti as i32) {
+            // LM_PROBE_SPOT=1: only lightmaps lit by a spotlight (and nothing but spotlights for =2).
+            if let Ok(s) = std::env::var("LM_PROBE_SPOT") {
+                let kinds: Vec<bool> = lm.lights.iter().filter_map(|b| light(b.actor)).map(|l| l.kind == upkg::lighting::LightKind::Spot).collect();
+                if !kinds.iter().any(|k| *k) || (s == "2" && !kinds.iter().all(|k| *k)) {
+                    continue;
+                }
+            }
             build_lightmap(&m, lm, &mut mine, t.width, &mut light, &amb, ls);
             // Per-lightmap mean luminance.
             let (mut a, mut b, mut c) = (0f64, 0f64, 0f64);
@@ -51,8 +59,14 @@ fn main() {
                     if o + 3 >= saved.len() {
                         continue;
                     }
-                    a += (saved[o] as f64 + saved[o + 1] as f64 + saved[o + 2] as f64) / 3.0;
-                    b += (mine[o] as f64 + mine[o + 1] as f64 + mine[o + 2] as f64) / 3.0;
+                    let (sv, mv) = ((saved[o] as f64 + saved[o + 1] as f64 + saved[o + 2] as f64) / 3.0, (mine[o] as f64 + mine[o + 1] as f64 + mine[o + 2] as f64) / 3.0);
+                    a += sv;
+                    b += mv;
+                    // Texel classes by the saved value: shadow (< 12), mid, lit (> 60).
+                    let k = if sv < 12.0 { 0 } else if sv <= 60.0 { 1 } else { 2 };
+                    cls[k].0 += sv;
+                    cls[k].1 += mv;
+                    cls[k].2 += 1.0;
                     c += 1.0;
                 }
             }
@@ -74,6 +88,10 @@ fn main() {
             let ma: f64 = mine.chunks_exact(4).map(|p| p[2] as f64).sum::<f64>() / (mine.len() / 4) as f64;
             println!("atlas0 mean B saved {sa:.1} rebuilt {ma:.1}; saved first texel {:?}", &saved[..4]);
         }
+    }
+    for (k, name) in ["shadow<12", "mid", "lit>60"].iter().enumerate() {
+        let (s, r, c) = cls[k];
+        println!("  texels {name}: {c:.0} saved {:.1} rebuilt {:.1}", s / c.max(1.0), r / c.max(1.0));
     }
     let cov = sor / n - (so / n) * (sr / n);
     let corr = cov / ((soo / n - (so / n).powi(2)).sqrt() * (srr / n - (sr / n).powi(2)).sqrt());

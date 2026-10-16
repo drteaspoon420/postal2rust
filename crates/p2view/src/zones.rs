@@ -17,6 +17,10 @@ use std::sync::Arc;
 #[derive(Component, Clone, Copy)]
 pub struct ZoneTag(pub u8);
 
+/// Marks an entity whose actor script has hidden (bHidden): zone culling must not show it again.
+#[derive(Component, Clone, Copy)]
+pub struct ActorHidden;
+
 /// A set of zone numbers (0..=255).
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct ZoneSet([u64; 4]);
@@ -89,10 +93,14 @@ impl ZoneGraph {
 }
 
 /// Hides static actors whose zone the camera's zone cannot see. `P2VIEW_NO_ZONE_CULL` disables it.
-pub fn zone_cull(mut graph: Option<ResMut<ZoneGraph>>, cams: Query<(&GlobalTransform, &Camera), With<Camera3d>>, mut q: Query<(&ZoneTag, &mut Visibility)>) {
+pub fn zone_cull(mut graph: Option<ResMut<ZoneGraph>>, cams: Query<(&GlobalTransform, &Camera), With<Camera3d>>, mut q: Query<(&ZoneTag, &mut Visibility, Has<ActorHidden>)>, mut unhidden: RemovedComponents<ActorHidden>) {
     let Some(g) = graph.as_mut() else { return };
     if std::env::var_os("P2VIEW_NO_ZONE_CULL").is_some() {
         return;
+    }
+    // An actor script showed again needs its zone visibility re-applied.
+    if unhidden.read().count() > 0 {
+        g.last = None;
     }
     let Some(bsp) = g.bsp.clone() else { return };
     // The main world camera: the active 3D camera with the highest order (the sky camera is -1).
@@ -107,8 +115,8 @@ pub fn zone_cull(mut graph: Option<ResMut<ZoneGraph>>, cams: Query<(&GlobalTrans
     if std::env::var_os("P2VIEW_ZONE_TRACE").is_some() {
         println!("ZONECULL camera zone {zone} visible {vis:x}");
     }
-    for (t, mut v) in &mut q {
-        let want = if vis.contains(t.0) { Visibility::Inherited } else { Visibility::Hidden };
+    for (t, mut v, hidden) in &mut q {
+        let want = if !hidden && vis.contains(t.0) { Visibility::Inherited } else { Visibility::Hidden };
         if *v != want {
             *v = want;
         }

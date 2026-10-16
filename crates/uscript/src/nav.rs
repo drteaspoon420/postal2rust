@@ -126,6 +126,13 @@ pub struct NavCounters {
 const UNVISITED: i32 = 10_000_000;
 const SEED_RADIUS: f32 = 1200.0;
 const ROUTE_LEN: usize = 16;
+/// Route searches seed from at most this many reachable points, nearest first.
+const SEED_MAX: usize = 3;
+
+fn all_seeds() -> bool {
+    static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALL.get_or_init(|| std::env::var_os("P2_NAV_ALL_SEEDS").is_some())
+}
 
 fn dist(a: [f32; 3], b: [f32; 3]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
@@ -263,10 +270,19 @@ impl Vm {
         if let Some(a) = anchor.filter(|&a| dist(g.node_location(a), m.location) < SEED_RADIUS && self.reachable(m, g.node_location(a))) {
             seeds.push((a, dist(g.node_location(a), m.location) as i32));
         } else {
-            for k in 0..n as u32 {
-                let l = g.node_location(k);
-                let d = dist(l, m.location);
-                if d < SEED_RADIUS && self.reachable(m, l) {
+            // Nearest first, stopping after SEED_MAX reachable points (UE2 seeds from one anchor,
+            // the nearest reachable point). Each reach test is a collision walk (~0.1-0.3 ms);
+            // testing every point within SEED_RADIUS (~40) made FindRandomDest cost 3-14 ms per
+            // call and ~0.7 s over the first ticks after a level load.
+            // `P2_NAV_ALL_SEEDS=1` restores seeding from every reachable point in range.
+            let mut cand: Vec<(u32, f32)> = (0..n as u32).map(|k| (k, dist(g.node_location(k), m.location))).filter(|&(_, d)| d < SEED_RADIUS).collect();
+            cand.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            let max = if all_seeds() { usize::MAX } else { SEED_MAX };
+            for (k, d) in cand {
+                if seeds.len() >= max {
+                    break;
+                }
+                if self.reachable(m, g.node_location(k)) {
                     seeds.push((k, d as i32));
                 }
             }

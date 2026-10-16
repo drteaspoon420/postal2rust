@@ -71,6 +71,9 @@ pub struct MatData {
     /// Animated texture (UE2 AnimNext frame chain): texture ids of every frame, starting with
     /// `texture`, and the playback rate in frames per second. Empty for still textures.
     pub frames: Vec<u32>,
+    /// Shader Opacity glass: drawn after the other translucents (blended terrain layers,
+    /// foliage) as dynmesh glass is. Bevy sorts blended meshes by centre plus depth_bias.
+    pub glass: bool,
     pub frame_rate: f32,
 }
 
@@ -323,10 +326,11 @@ impl<'l> Builder<'l> {
             return id;
         }
         let info = mat.as_ref().and_then(|m| self.lib.material_texture(m));
-        let mut data = MatData { texture: None, blend: Blend::Opaque, two_sided: false, size: (256.0, 256.0), uv_anim: Vec::new(), frames: Vec::new(), frame_rate: 0.0 };
+        let mut data = MatData { texture: None, blend: Blend::Opaque, two_sided: false, size: (256.0, 256.0), uv_anim: Vec::new(), frames: Vec::new(), frame_rate: 0.0, glass: false };
         if let Some(info) = info {
             data.two_sided = info.two_sided;
             data.uv_anim = info.uv_anim.clone();
+            data.glass = info.blended && info.opacity.is_some();
             let op_blend = match info.op {
                 Some(upkg::library::BlendOp::Modulate) => Some(Blend::Modulate),
                 Some(upkg::library::BlendOp::Darken) => Some(Blend::Darken),
@@ -372,6 +376,17 @@ impl<'l> Builder<'l> {
             }
         } else if mat.is_some() {
             self.stats.unresolved += 1;
+        }
+        if let (Ok(f), Some(m)) = (std::env::var("P2VIEW_MAT_OPAQUE"), mat.as_ref()) {
+            if m.pkg.name(m.pkg.exports[m.export].name).eq_ignore_ascii_case(&f) {
+                data.blend = Blend::Opaque;
+            }
+        }
+        if let (Ok(f), Some(m)) = (std::env::var("P2VIEW_MAT_TRACE"), mat.as_ref()) {
+            let name = m.pkg.name(m.pkg.exports[m.export].name);
+            if name.to_ascii_lowercase().contains(&f.to_ascii_lowercase()) {
+                eprintln!("mat trace {name}: blend {:?} two_sided {} glass {}", data.blend, data.two_sided, data.glass);
+            }
         }
         let id = self.materials.len() as u32;
         self.materials.push(data);
@@ -534,6 +549,8 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
     let mut world: HashMap<(u32, i32, u8), MeshData> = HashMap::new();
     let mut sky_world: HashMap<(u32, i32, u8), MeshData> = HashMap::new();
     let model = find_world_model(map).map(|mi| read_model(map, mi)).transpose()?;
+    // BSP lightmap atlases saved without data (lighting never rebuilt before saving): see the SMI relight below.
+    let stale_smi = model.as_ref().is_some_and(|m| m.light_map_textures.iter().any(|t| t.mips.is_empty() || t.width == 0 || t.height == 0 || t.width > 4096 || t.height > 4096));
     let sky_zone = model.as_ref().and_then(|m| m.zones.iter().position(|z| map.class_of(*z).eq_ignore_ascii_case("SkyZoneInfo")));
     let sky_ref = sky_zone.and_then(|i| model.as_ref().map(|m| m.zones[i]));
     let sky_origin = sky_ref.and_then(|r| match r {
@@ -701,7 +718,11 @@ pub fn build_scene(lib: &Library, map: &Arc<Package>, opts: &Options) -> upkg::R
         let light = match props.object("StaticMeshInstance") {
             Some(ObjRef::Export(e)) if props.bool("bUnlit") != Some(true) => upkg::staticmesh::read_instance_colors(map, e)
                 .ok()
-                .and_then(|c| if c.iter().any(|v| v[3] != 0) { Some(c) } else { instance_static_light(map, e, &sm_obj, lin, Vec3::from(loc), &mut light_cache) })
+                // Maps saved without built BSP lightmaps (dataless atlases, rebuilt at load: MilitaryBase,
+                // HomeAtNight) also carry stale StaticMeshInstance colours: the MilitaryBase cell beds
+                // drew at 19,21,23 vs orig 30,33,36, relit 29,33,36 (FIDELITY #52).
+                // P2VIEW_SMI_STALE_KEEP=1 = use the saved colours there too.
+                .and_then(|c| if c.iter().any(|v| v[3] != 0) && std::env::var_os("P2VIEW_SMI_FORCE_RELIGHT").is_none() && !(stale_smi && std::env::var_os("P2VIEW_SMI_STALE_KEEP").is_none()) { Some(c) } else { instance_static_light(map, e, &sm_obj, lin, Vec3::from(loc), &mut light_cache) })
                 .map(Arc::new),
             // No StaticMeshInstance (movers/doors, non-static decorations): UE2 lights the actor
             // per actor, zone ambient + AmbientGlow + the lights that reach its location
@@ -714,6 +735,18 @@ actor_static_light(&sm_obj, lin, Vec3::from(loc), props.bool("bSpecialLit") == S
         };
         if light.is_some() {
             b.stats.baked_actors += 1;
+        }
+        // P2VIEW_BAKE_TRACE=name substring: which lighting path an actor took and its mean colour.
+        if let Ok(f) = std::env::var("P2VIEW_BAKE_TRACE") {
+            let name = map.name(map.exports[i].name);
+            if name.to_ascii_lowercase().contains(&f.to_ascii_lowercase()) {
+                let saved = match props.object("StaticMeshInstance") {
+                    Some(ObjRef::Export(e)) => upkg::staticmesh::read_instance_colors(map, e).ok().map(|c| (c.len(), c.iter().filter(|v| v[3] != 0).count(), upkg::staticmesh::read_instance_lights(map, e).map(|l| l.len()).unwrap_or(0))),
+                    _ => None,
+                };
+                let mean = light.as_ref().map(|c| c.iter().fold([0f32; 3], |a, v| [a[0] + v[0] as f32, a[1] + v[1] as f32, a[2] + v[2] as f32]).map(|s| s / c.len().max(1) as f32));
+                eprintln!("bake trace {name} at {loc:?}: smi (verts, alpha!=0, lights) {saved:?} mean {mean:?} glow {:?}", props.byte("AmbientGlow"));
+            }
         }
         // 255 means pulsing in UE2; treat it as no glow.
         let glow = props.byte("AmbientGlow").filter(|&g| g < 255).unwrap_or(0) as f32;
@@ -1143,12 +1176,78 @@ fn actor_static_light(
     };
     list.sort_by(|a, b| strength(b).total_cmp(&strength(a)));
     list.truncate(std::env::var("P2VIEW_ACTOR_MAX_LIGHTS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(8));
+    // Sunlight only where the sky is visible: the leaf light list says the sun reaches the
+    // leaf, not this actor. VincesHouse patio glass under the porch roof took the full sun
+    // (5 sunlights) and drew milky white instead of the original's dark grey (#56). Fraction of
+    // up to 16 sample vertices (pushed 4 uu off the surface) with a clear BSP line to the sun.
+    // P2VIEW_ACTOR_SUN_ALWAYS=1 restores the unoccluded sun.
+    let sun_vis: HashMap<usize, f32> = if std::env::var_os("P2VIEW_ACTOR_SUN_ALWAYS").is_some() {
+        HashMap::new()
+    } else {
+        let step = (sm.positions.len() / 16).max(1);
+        // Sky surfaces (PF_FakeBackdrop) are BSP walls too: a ray that enters solid within a
+        // few units past a backdrop polygon has reached the sky, not an occluder.
+        let backdrops: Vec<(Vec3, Vec<Vec3>)> = model
+            .nodes
+            .iter()
+            .filter(|n| n.num_verts >= 3 && model.surfs.get(n.surf as usize).is_some_and(|s| s.flags & pf::FAKE_BACKDROP != 0))
+            .map(|n| (Vec3::new(n.plane[0], n.plane[1], n.plane[2]), model.node_polygon(n).map(Vec3::from).collect()))
+            .collect();
+        let hits_backdrop = |a: Vec3, b: Vec3, t_solid: f32| {
+            let d = b - a;
+            backdrops.iter().any(|(nrm, poly)| {
+                let den = nrm.dot(d);
+                if den.abs() < 1e-6 {
+                    return false;
+                }
+                let t = nrm.dot(poly[0] - a) / den;
+                if !(0.0..=t_solid + 8.0 / d.length()).contains(&t) {
+                    return false;
+                }
+                let p = a + d * t;
+                let mut sign = 0.0f32;
+                for k in 0..poly.len() {
+                    let c = (poly[(k + 1) % poly.len()] - poly[k]).cross(p - poly[k]).dot(*nrm);
+                    if c.abs() > 1e-3 {
+                        if sign != 0.0 && c.signum() != sign {
+                            return false;
+                        }
+                        sign = c.signum();
+                    }
+                }
+                true
+            })
+        };
+        list.iter()
+            .filter(|l| l.kind == upkg::lighting::LightKind::Sun)
+            .map(|l| {
+                let to_sun = -Vec3::from(l.direction()).normalize_or_zero();
+                let (mut n, mut lit) = (0, 0);
+                for v in (0..sm.positions.len()).step_by(step) {
+                    let nn = (nrm_m * Vec3::from(sm.normals.get(v).copied().unwrap_or([0.0, 0.0, 1.0]))).normalize_or_zero();
+                    let p = lin * Vec3::from(sm.positions[v]) + loc + nn * 4.0;
+                    n += 1;
+                    let end = p + to_sun * 30000.0;
+                    match bsp.line_check(p, end) {
+                        None => lit += 1,
+                        Some((t, _)) if t > 0.0 && hits_backdrop(p, end, t) => lit += 1,
+                        _ => {}
+                    }
+                }
+                (l.export, lit as f32 / n.max(1) as f32)
+            })
+            .collect()
+    };
     for l in &list {
         let le = l.export;
         if trace {
             eprintln!("actor light: mesh {} at {loc:?} leaf {leaf} <- {} {} {:?} b {} r {} effect {} cone {} dir {} rot {:?}", mesh.pkg.name(mesh.pkg.exports[mesh.export].name), l.class, le, l.location, l.brightness, l.world_radius(), l.light_effect, l.cone, l.directional, l.rotation);
         }
-        let color = Vec3::from(upkg::lighting::hsv_to_rgb(l.hue, l.saturation)) * (l.brightness / 255.0) * 0.5;
+        let vis = sun_vis.get(&le).copied().unwrap_or(1.0);
+        if trace && l.kind == upkg::lighting::LightKind::Sun {
+            eprintln!("actor light: mesh {} at {loc:?} sun {le} visible {vis:.2}", mesh.pkg.name(mesh.pkg.exports[mesh.export].name));
+        }
+        let color = Vec3::from(upkg::lighting::hsv_to_rgb(l.hue, l.saturation)) * (l.brightness / 255.0) * 0.5 * vis;
         for (v, p) in sm.positions.iter().enumerate() {
             let wp = lin * Vec3::from(*p) + loc;
             let nn = (nrm_m * Vec3::from(sm.normals.get(v).copied().unwrap_or([0.0, 0.0, 1.0]))).normalize_or_zero();
@@ -1199,6 +1298,11 @@ fn rebuild_dataless_lightmaps(map: &Package, model: &upkg::model::Model, lightma
             })
             .clone()
     };
+    // UE2's load-time rebuild comes out brighter than the editor-built atlases the light scale is
+    // calibrated on: the MilitaryBase cell (orig floor/wallL/wallR 28/18/14) measured 16/12/7 at
+    // 1.0 and 24/21/14 at 1.4 (1.25: 21/18/11, 1.6: 29/26/17; FIDELITY #52, out\r52\g*.png).
+    // Empirical, dataless atlases only. P2VIEW_LM_REBUILD_GAIN=1 = calibrated scale.
+    let rebuild_gain: f32 = std::env::var("P2VIEW_LM_REBUILD_GAIN").ok().and_then(|s| s.parse().ok()).unwrap_or(1.4);
     let mut built = 0;
     for &ti in &dataless {
         let (w, h) = upkg::lightmap::infer_atlas_size(model, ti as i32);
@@ -1207,7 +1311,7 @@ fn rebuild_dataless_lightmaps(map: &Package, model: &upkg::model::Model, lightma
         }
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         for lm in model.light_maps.iter().filter(|l| l.texture == ti as i32) {
-            upkg::lightmap::build_lightmap(model, lm, &mut rgba, w, &mut light, &ambient, upkg::lightmap::LIGHT_SCALE);
+            upkg::lightmap::build_lightmap(model, lm, &mut rgba, w, &mut light, &ambient, upkg::lightmap::LIGHT_SCALE * rebuild_gain);
             built += 1;
         }
         lightmaps[ti] = LightmapData { width: w, height: h, rgba };
@@ -1259,6 +1363,23 @@ fn terrain_static_light(map: &Package, terrain_export: usize, t: &upkg::terrain:
         // ambient 11 is ~0.25, the day map's 102 ~0.75 (linear would be 0.04 and 0.4).
         .map(|z| (ue2_hue(z.ambient_hue, z.ambient_saturation) * (z.ambient_brightness as f32 * 1.4 / 255.0).sqrt().min(1.0)).to_array())
         .unwrap_or([0.0; 3]);
+    // Night maps put the terrain in a dim zone under a brighter LevelInfo (ngt-suburbs-3 11 vs 23,
+    // ngt-Junkyard 22 vs 51, ngt-Estates 22 vs 33) and their terrain drew ~40% darker than the
+    // original (#29); day maps have the brighter terrain zone (suburbs-3 102 vs 23), unchanged.
+    // Brighter of the two per channel. P2VIEW_TERRAIN_AMB_ZONE_ONLY=1 = terrain zone only.
+    let amb = match zones.iter().find(|z| z.class.eq_ignore_ascii_case("LevelInfo")).filter(|_| std::env::var_os("P2VIEW_TERRAIN_AMB_ZONE_ONLY").is_none()) {
+        Some(z) => {
+            // ngt-suburbs-3's LevelInfo is hue 0 / saturation 0, the only saturation-0 ambient in the
+            // shipped maps. Our hue ramp makes that pure red (terrain hill 33,17,10), but the original's
+            // terrain is lifted on all channels (35,24,17), so it is taken as grey here (34,22,14).
+            // P2VIEW_TERRAIN_AMB_SAT0_RED=1 = red as before.
+            let grey0 = z.ambient_saturation == 0 && std::env::var_os("P2VIEW_TERRAIN_AMB_SAT0_RED").is_none();
+            let hue = if grey0 { Vec3::ONE } else { ue2_hue(z.ambient_hue, z.ambient_saturation) };
+            let l = (hue * (z.ambient_brightness as f32 * 1.4 / 255.0).sqrt().min(1.0)).to_array();
+            [amb[0].max(l[0]), amb[1].max(l[1]), amb[2].max(l[2])]
+        }
+        None => amb,
+    };
     let amb_scale: f32 = std::env::var("P2VIEW_TERRAIN_AMB").ok().and_then(|v| v.parse().ok()).unwrap_or(0.45);
     let light_scale: f32 = std::env::var("P2VIEW_TERRAIN_LIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let mut lights: HashMap<usize, Option<upkg::lighting::MapLight>> = HashMap::new();
@@ -1461,7 +1582,12 @@ fn build_terrain(b: &mut Builder, map: &Arc<Package>, t: &upkg::terrain::Terrain
         } else {
             match b.lib.resolve(map, layer.alpha_map).and_then(|o| upkg::terrain::read_alpha_map(&o).ok()) {
                 Some(a) => Some(a),
-                None if layer.alpha_map == ObjRef::Null => None,
+                // An upper layer without an AlphaMap draws nothing: EasterArena's L3 (SandPebbles01,
+                // scale 1, no alpha) was drawn at full weight over the whole terrain and hid the
+                // grass layer the original shows beside the path (also TrainingCamp2/4 zo_bisbeehills).
+                // P2VIEW_TERRAIN_NOALPHA_FULL=1 = draw it fully as before.
+                None if layer.alpha_map == ObjRef::Null && std::env::var_os("P2VIEW_TERRAIN_NOALPHA_FULL").is_some() => None,
+                None if layer.alpha_map == ObjRef::Null => continue,
                 None => continue,
             }
         };

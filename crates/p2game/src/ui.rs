@@ -283,8 +283,9 @@ pub(crate) fn hide_own_body(sim: NonSend<Sim>, ui: Res<UiInput>, rigs: Query<&cr
         }
         false
     };
+    let head = vm.get_prop(pawn, "MyHead").and_then(|v| v.as_obj());
     for r in rigs.iter() {
-        if r.actor == pawn || mine(r.actor) || vm.get_prop(pawn, "MyHead").and_then(|v| v.as_obj()) == Some(r.actor) {
+        if r.actor == pawn || head == Some(r.actor) || mine(r.actor) {
             for &s in &r.sections {
                 if let Ok(mut v) = vis.get_mut(s) {
                     *v = Visibility::Hidden;

@@ -147,9 +147,22 @@ pub fn resolve_path(lib: &Library, path: &str, class: Option<&str>) -> Option<Ob
     let leaf = rest.last()?;
     let groups: Vec<&str> = rest[..rest.len() - 1].iter().rev().copied().collect();
     let pkg = lib.package(pkg_name)?;
+    // Candidates with the leaf name, in export order: through a per-package name index (built
+    // once per package) instead of scanning every export per lookup. Same candidates in the same
+    // order, so the same result. `P2GAME_NO_RESOLVE_INDEX=1`: the plain scan.
+    let indexed = resolve_index_enabled().then(|| export_name_index(&pkg));
+    let scan: Vec<usize>;
+    let cands: &[usize] = match &indexed {
+        Some(ix) => ix.get(&leaf.to_ascii_lowercase()).map(|v| v.as_slice()).unwrap_or(&[]),
+        None => {
+            scan = (0..pkg.exports.len()).filter(|&i| pkg.name(pkg.exports[i].name).eq_ignore_ascii_case(leaf)).collect();
+            &scan
+        }
+    };
     let mut fallback = None;
-    for (i, e) in pkg.exports.iter().enumerate() {
-        if !pkg.name(e.name).eq_ignore_ascii_case(leaf) || class.is_some_and(|c| !pkg.export_class(i).eq_ignore_ascii_case(c)) {
+    for &i in cands {
+        let e = &pkg.exports[i];
+        if class.is_some_and(|c| !pkg.export_class(i).eq_ignore_ascii_case(c)) {
             continue;
         }
         let mut outer = e.outer;
@@ -169,6 +182,39 @@ pub fn resolve_path(lib: &Library, path: &str, class: Option<&str>) -> Option<Ob
         fallback.get_or_insert(i);
     }
     fallback.map(|export| Obj { pkg, export })
+}
+
+fn resolve_index_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("P2GAME_NO_RESOLVE_INDEX").is_none())
+}
+
+type NameIndex = Arc<HashMap<String, Vec<usize>>>;
+
+/// Lowercase export name -> export indices (table order) of `pkg`, built once per package
+/// object. Keyed by the package's address and validated with a weak reference, so a package
+/// that was dropped and replaced (level change) gets a fresh index.
+fn export_name_index(pkg: &Arc<upkg::Package>) -> NameIndex {
+    thread_local! {
+        static INDEX: RefCell<HashMap<usize, (std::sync::Weak<upkg::Package>, NameIndex)>> = RefCell::new(HashMap::new());
+    }
+    let key = Arc::as_ptr(pkg) as usize;
+    INDEX.with(|ix| {
+        let mut ix = ix.borrow_mut();
+        if let Some((w, i)) = ix.get(&key) {
+            if w.upgrade().is_some_and(|p| Arc::ptr_eq(&p, pkg)) {
+                return i.clone();
+            }
+        }
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, e) in pkg.exports.iter().enumerate() {
+            by_name.entry(pkg.name(e.name).to_ascii_lowercase()).or_default().push(i);
+        }
+        let i: NameIndex = Arc::new(by_name);
+        ix.retain(|_, (w, _)| w.strong_count() > 0);
+        ix.insert(key, (Arc::downgrade(pkg), i.clone()));
+        i
+    })
 }
 
 fn obj_path(o: &Obj) -> String {
@@ -526,14 +572,13 @@ impl GameHost {
             let mut m = self.anims.borrow_mut();
             let Some(x) = m.get_mut(&a) else { return };
             let world = skel_actor_world(vm, a, x.inst.skeleton.mesh_xform);
-            let ids: Vec<(u64, usize)> = x.inst.attachments().map(|(id, at)| (*id, at.bone)).collect();
-            for (id, bone) in ids {
+            let ids: Vec<u64> = x.inst.attachments().map(|(id, _)| *id).collect();
+            for id in ids {
                 // Script may change RelativeLocation/Rotation after attaching (heads do).
                 if let Some(child) = vm.objects.get(id as usize).filter(|o| !o.deleted).map(|_| id as ObjId) {
                     let rel_l = Vec3::from(vm.get_prop(child, "RelativeLocation").map(|v| v.as_vec()).unwrap_or_default());
                     let rel_r = vm.get_prop(child, "RelativeRotation").map(|v| v.as_rot()).unwrap_or_default();
-                    let name = x.inst.skeleton.names[bone].clone();
-                    x.inst.attach_to_bone(id, &name, rel_l, rel_r);
+                    x.inst.set_attachment_relative(id, rel_l, rel_r);
                 }
                 let Some(t) = x.inst.attachment_transform(id) else { continue };
                 moves.push((id as ObjId, world * t));

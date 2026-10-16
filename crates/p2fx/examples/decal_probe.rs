@@ -83,6 +83,7 @@ fn main() {
                 rotation: p.rotator("Rotation").unwrap_or([0; 3]),
                 half_w: w * ds * ds3.y.abs() * 0.5,
                 half_h: h * ds * ds3.z.abs() * 0.5,
+                spread: p.int("FOV").map(|f| f as f32).filter(|f| *f > 1.0 && std::env::var_os("P2FX_PROJ_ORTHO").is_none()).map_or(0.0, |f| (f.min(179.0).to_radians() * 0.5).tan()),
                 depth: p.int("MaxTraceDistance").map(|d| d as f32).filter(|d| *d > 0.0).unwrap_or(1000.0),
                 texture: tex.clone(),
                 style: upkg::emitter::DrawStyle::AlphaBlend,

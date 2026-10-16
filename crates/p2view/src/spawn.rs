@@ -160,6 +160,8 @@ pub struct SpawnedScene {
     pub textures: Vec<Handle<Image>>,
     pub materials: Vec<Handle<StandardMaterial>>,
     pub meshes: Vec<Handle<Mesh>>,
+    /// Merge candidates, when [`SpawnOptions::merge`] was set.
+    pub merge: Option<MergePlan>,
 }
 
 /// Spawns everything in `data` except the camera, using baked lighting where the map has it.
@@ -174,16 +176,108 @@ pub fn spawn_scene_data(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) -> SpawnedScene {
-    spawn_scene_with(commands, data, SpawnOptions { unlit, baked: true }, images, meshes, materials)
+    spawn_scene_with(commands, data, SpawnOptions { unlit, baked: true, merge: false }, images, meshes, materials)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct SpawnOptions {
     /// Plain texture colours, no lighting at all.
     pub unlit: bool,
     /// Use the map's baked lighting (BSP lightmaps, static mesh vertex lighting) where present,
     /// as the original renderer does. When false, everything is lit dynamically.
     pub baked: bool,
+    /// Record the static mesh instances that could be merged ([`SpawnedScene::merge`]); the front
+    /// end merges the ones that turn out never to change with [`MergePlan::apply`].
+    pub merge: bool,
+}
+
+/// A static mesh instance spawned as its own entity that could be merged into a shared mesh.
+pub struct MergeCandidate {
+    pub export: usize,
+    pub entity: Entity,
+    mesh: u32,
+    material: u32,
+    zone: u8,
+    transform: Mat4,
+    colors: Option<Vec<[f32; 4]>>,
+}
+
+/// Static mesh instances that can be merged per (material, lighting, zone, cell) into a few large
+/// meshes to cut draw calls (thousands of separate draws made town render-thread bound).
+/// Only opaque/masked sections without a cull distance qualify, and only whole actors.
+#[derive(Default)]
+pub struct MergePlan {
+    pub candidates: Vec<MergeCandidate>,
+    meshes: std::sync::Arc<Vec<scene::MeshData>>,
+    materials: Vec<Handle<StandardMaterial>>,
+    uv_anims: Vec<Option<crate::uvanim::UvAnim>>,
+    tex_anims: Vec<Option<crate::uvanim::TexAnim>>,
+}
+
+impl MergePlan {
+    /// Merges the candidates whose export `keep` accepts (actors that will never move, hide or be
+    /// destroyed again): spawns the merged meshes and despawns the individual entities.
+    /// Returns (despawned entities, spawned entities).
+    pub fn apply(self, keep: impl Fn(usize) -> bool, commands: &mut Commands, meshes: &mut Assets<Mesh>, materials: &Assets<StandardMaterial>) -> (Vec<Entity>, Vec<Entity>) {
+        // (material, vertex lit, zone, cell x, cell z) -> merged mesh.
+        let mut merged: HashMap<(u32, bool, u8, i32, i32), scene::MeshData> = HashMap::new();
+        let mut gone = Vec::new();
+        let cell = merge_cell();
+        for c in self.candidates.into_iter().filter(|c| keep(c.export)) {
+            let t = c.transform.w_axis;
+            let key = (c.material, c.colors.is_some(), c.zone, (t.x / cell).floor() as i32, (t.z / cell).floor() as i32);
+            append_transformed(merged.entry(key).or_default(), &self.meshes[c.mesh as usize], &c.transform, c.colors.as_deref());
+            commands.entity(c.entity).despawn();
+            gone.push(c.entity);
+        }
+        let mut vertex_lit = Vec::new();
+        let mut spawned = Vec::new();
+        for ((material, lit, zone, _, _), md) in merged {
+            let mesh = meshes.add(build_mesh(&md));
+            let mut e = if lit {
+                let e = commands.spawn((Mesh3d(mesh), Transform::IDENTITY));
+                let base = materials.get(&self.materials[material as usize]).cloned().unwrap_or_default();
+                vertex_lit.push((e.id(), material, base));
+                e
+            } else {
+                commands.spawn((Mesh3d(mesh), MeshMaterial3d(self.materials[material as usize].clone()), Transform::IDENTITY, bevy::light::NotShadowReceiver))
+            };
+            if zone != 0 {
+                e.insert(crate::zones::ZoneTag(zone));
+            }
+            if let Some(a) = &self.uv_anims[material as usize] {
+                e.insert(a.clone());
+            }
+            if let Some(a) = &self.tex_anims[material as usize] {
+                e.insert(a.clone());
+            }
+            spawned.push(e.id());
+        }
+        baked::attach_vertex_lit(commands, vertex_lit);
+        (gone, spawned)
+    }
+}
+
+/// Merge cell edge in metres (about 2048 uu): keeps frustum culling useful for merged meshes.
+/// `P2VIEW_MERGE_CELL=<m>` overrides it.
+const MERGE_CELL_M: f32 = 39.0;
+
+fn merge_cell() -> f32 {
+    std::env::var("P2VIEW_MERGE_CELL").ok().and_then(|v| v.parse().ok()).unwrap_or(MERGE_CELL_M)
+}
+
+/// Appends `src` placed by `tf` to `dst`. Mirroring transforms keep their winding: the scene
+/// already gave those instances a winding-reversed mesh, so baking the transform matches the GPU.
+fn append_transformed(dst: &mut scene::MeshData, src: &scene::MeshData, tf: &Mat4, colors: Option<&[[f32; 4]]>) {
+    let base = dst.positions.len() as u32;
+    let nm = Mat3::from_mat4(*tf).inverse().transpose();
+    dst.positions.extend(src.positions.iter().map(|p| tf.transform_point3(Vec3::from(*p)).to_array()));
+    dst.normals.extend(src.normals.iter().map(|n| (nm * Vec3::from(*n)).normalize_or_zero().to_array()));
+    dst.uvs.extend_from_slice(&src.uvs);
+    if let Some(c) = colors {
+        dst.colors.extend_from_slice(c);
+    }
+    dst.indices.extend(src.indices.iter().map(|i| i + base));
 }
 
 pub fn spawn_scene_with(
@@ -196,6 +290,7 @@ pub fn spawn_scene_with(
 ) -> SpawnedScene {
     let unlit = opts.unlit;
     let baked = opts.baked && !unlit;
+    let no_merge = std::env::var_os("P2VIEW_NO_MERGE").is_some();
     let t0 = std::time::Instant::now();
     let timing = std::env::var_os("P2VIEW_SPAWN_TIMING").is_some();
     let lap = |what: &str| {
@@ -220,7 +315,7 @@ pub fn spawn_scene_with(
                 base_color_texture: m.texture.map(|t| tex_handles[t as usize].clone()),
                 alpha_mode: match m.blend {
                     Blend::Opaque => AlphaMode::Opaque,
-                    Blend::Masked => AlphaMode::Mask(0.5),
+                    Blend::Masked => AlphaMode::Mask(std::env::var("P2VIEW_MASK_CUTOFF").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5)),
                     Blend::Translucent => AlphaMode::Blend,
                     Blend::Modulate | Blend::Darken => AlphaMode::Multiply,
                     Blend::Additive => AlphaMode::Add,
@@ -230,6 +325,9 @@ pub fn spawn_scene_with(
                 perceptual_roughness: 0.95,
                 reflectance: 0.1,
                 unlit: unlit || matches!(m.blend, Blend::Modulate | Blend::Additive | Blend::Darken),
+                // Glass after blended terrain layers / foliage (they painted through the panes,
+                // VincesHouse #56). P2GAME_GLASS_BIAS overrides (same switch as dynmesh).
+                depth_bias: if m.glass && m.blend == Blend::Translucent { std::env::var("P2GAME_GLASS_BIAS").ok().and_then(|v| v.parse().ok()).unwrap_or(100_000.0) } else { 0.0 },
                 ..default()
             })
         })
@@ -293,7 +391,7 @@ pub fn spawn_scene_with(
         match m.lightmap.filter(|&lm| baked && usable.get(lm as usize).copied().unwrap_or(false)) {
             Some(lm) => {
                 let base = materials.get(&mat_handles[m.material as usize]).cloned().unwrap_or_default();
-                baked_batches.push(baked::BakedBatch { mesh, base, lightmap: lm, uv_anim: uv_anims[m.material as usize].clone(), tex_anim: tex_anims[m.material as usize].clone(), zone: m.zone });
+                baked_batches.push(baked::BakedBatch { mesh, base, material: m.material, lightmap: lm, uv_anim: uv_anims[m.material as usize].clone(), tex_anim: tex_anims[m.material as usize].clone(), zone: m.zone });
             }
             None => {
                 // UE2 static geometry only has baked shadowing: no real-time sun shadow on it.
@@ -321,8 +419,20 @@ pub fn spawn_scene_with(
     let mesh_handles: Vec<Handle<Mesh>> = data.meshes.iter().map(|m| meshes.add(build_mesh(m))).collect();
     let mut vertex_lit = Vec::new();
     let mut actors: HashMap<usize, Vec<Entity>> = HashMap::new();
+    let mut plan = opts.merge.then(|| MergePlan { meshes: std::sync::Arc::new(data.meshes.clone()), ..Default::default() });
+    let section_ok = |inst: &scene::Instance| {
+        let m = &data.meshes[inst.mesh as usize];
+        inst.cull_distance <= 0.0
+            && matches!(data.materials[inst.material as usize].blend, Blend::Opaque | Blend::Masked)
+            && m.uvs_b.is_empty()
+            && m.colors.is_empty()
+            && m.uvs.len() == m.positions.len()
+            && m.normals.len() == m.positions.len()
+    };
+    // All of an actor's sections merge or none do: front ends pair entities with instances in order.
+    let unmergeable: std::collections::HashSet<usize> = if plan.is_some() && !no_merge { data.instances.iter().filter(|i| !section_ok(i)).map(|i| i.export).collect() } else { Default::default() };
     for inst in &data.instances {
-        let lit = inst.light.as_ref().filter(|_| baked).and_then(|colors| {
+        let lit_colors = inst.light.as_ref().filter(|_| baked).and_then(|colors| {
             let src = &data.meshes[inst.mesh as usize];
             if src.source.is_empty() || src.source.iter().any(|&v| v as usize >= colors.len()) {
                 if std::env::var_os("P2VIEW_BAKE_DEBUG").is_some() {
@@ -330,15 +440,23 @@ pub fn spawn_scene_with(
                 }
                 return None;
             }
-            let mut md = scene::MeshData { positions: src.positions.clone(), normals: src.normals.clone(), uvs: src.uvs.clone(), indices: src.indices.clone(), ..Default::default() };
             // Baked static meshes add the ambient of the zone they were saved in (UE2), not the
             // LevelInfo's: suburbs-3 trees sit in the terrain zone (102, warm), the level is 23.
             // Scaled 0.65 to match the original's leaf brightness on the suburbs-3 start view.
             let k: f32 = std::env::var("P2VIEW_MESH_AMB").ok().and_then(|v| v.parse().ok()).unwrap_or(0.65);
             let za = if std::env::var_os("P2VIEW_MESH_LEVEL_AMB").is_some() { ambient } else { inst.zone_ambient.map(|a| a.map(|v| v * k)).unwrap_or(ambient) };
-            let amb = [za[0] + inst.glow, za[1] + inst.glow, za[2] + inst.glow];
-            md.colors = src.source.iter().map(|&v| baked::vertex_light(colors[v as usize], amb)).collect();
-            Some(meshes.add(build_mesh(&md)))
+            // AmbientGlow is a 0-255 brightness but the baked stream is modulate-2x (128 = 1.0), so
+            // it adds half: suburbs-3 trailer_dude (glow 36) day 118 -> 100 (orig 100), night
+            // 89 -> 71 (orig 66) at 1.0 -> 0.5. P2VIEW_SMI_GLOW_SCALE=1 = full glow as before.
+            let gk: f32 = std::env::var("P2VIEW_SMI_GLOW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
+            let g = inst.glow * gk;
+            let amb = [za[0] + g, za[1] + g, za[2] + g];
+            Some(src.source.iter().map(|&v| baked::vertex_light(colors[v as usize], amb)).collect::<Vec<_>>())
+        });
+        let lit = lit_colors.as_ref().map(|c| {
+            let src = &data.meshes[inst.mesh as usize];
+            let md = scene::MeshData { positions: src.positions.clone(), normals: src.normals.clone(), uvs: src.uvs.clone(), indices: src.indices.clone(), colors: c.clone(), ..Default::default() };
+            meshes.add(build_mesh(&md))
         });
         let mut e = match lit {
             Some(mesh) => {
@@ -368,6 +486,14 @@ pub fn spawn_scene_with(
             e.insert(a.clone());
         }
         actors.entry(inst.export).or_default().push(e.id());
+        if let Some(p) = plan.as_mut().filter(|_| !no_merge && !unmergeable.contains(&inst.export)) {
+            p.candidates.push(MergeCandidate { export: inst.export, entity: e.id(), mesh: inst.mesh, material: inst.material, zone: inst.zone, transform: inst.transform, colors: lit_colors });
+        }
+    }
+    if let Some(p) = plan.as_mut() {
+        p.materials = mat_handles.clone();
+        p.uv_anims = uv_anims.clone();
+        p.tex_anims = tex_anims.clone();
     }
     baked::attach_vertex_lit(commands, vertex_lit);
     commands.insert_resource(crate::zones::ZoneGraph::new(&data.portals, data.bsp.clone()));
@@ -395,5 +521,5 @@ pub fn spawn_scene_with(
         commands.insert_resource(ClearColor(c));
         (c, FogFalloff::Linear { start, end: end.max(start + 1.0) })
     });
-    SpawnedScene { movers: data.movers.iter().map(|m| (m.clone(), actors.get(&m.export).cloned().unwrap_or_default())).collect(), actors, fog, textures: tex_handles, materials: mat_handles, meshes: mesh_handles }
+    SpawnedScene { movers: data.movers.iter().map(|m| (m.clone(), actors.get(&m.export).cloned().unwrap_or_default())).collect(), actors, fog, textures: tex_handles, materials: mat_handles, meshes: mesh_handles, merge: plan }
 }

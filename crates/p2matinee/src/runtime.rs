@@ -329,9 +329,24 @@ impl ScenePlayer {
             self.time += dt * self.scene_speed * speed;
         }
         if self.skip_requested {
-            self.skip_requested = false;
-            // Past the end: the scene ends this tick (sub-actions are not replayed).
-            self.time = self.total + 1e-3;
+            // Skipping runs the rest of the timeline quickly instead of jumping to the end:
+            // each tick jumps to the next trigger sub-action that has not fired yet, so the
+            // scripts waiting on those events (ScriptedSequences on ACTION_WaitForEvent)
+            // advance one event per frame in their authored order. Firing them all in one
+            // frame let a later sequence take the pawn before an earlier one ran its next
+            // action: skipping the intro's TrailerScene2 left the Dude hidden (DudeHeadsOut's
+            // ACTION_SetHidden ran after DudeMapScene had taken him over).
+            let next = (0..self.subs.len())
+                .filter(|&k| self.subs[k].status == SubStatus::Waiting && matches!(&self.scene.actions[self.subs[k].action].sub_actions[self.subs[k].index].kind, SubActionKind::Trigger { event } if !event.is_empty()))
+                .map(|k| self.subs[k].start)
+                .min_by(|a, b| a.total_cmp(b));
+            match next {
+                Some(s) if s <= self.total => self.time = self.time.max(s),
+                _ => {
+                    self.skip_requested = false;
+                    self.time = self.total + 1e-3;
+                }
+            }
         }
         if self.time > self.total {
             self.running = false;

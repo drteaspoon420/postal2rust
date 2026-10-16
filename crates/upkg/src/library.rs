@@ -165,7 +165,24 @@ impl Library {
                 // the diffuse's own alpha is 0 on the panes.
                 _ if class == "shader" && opacity.is_some() => {
                     if opacity == props.object("Diffuse") {
-                        info.masked = true;
+                        // ...unless the texture has no cut-out texels: AW door/bank glass
+                        // (zo_greenbelt.zo_doorglass, Opacity = Diffuse = zo_doorglass_opaque,
+                        // alpha ~176 everywhere, none clear) alpha-tested to solid white panes
+                        // (VincesHouse, FIDELITY #56). Blend it like a separate Opacity mask.
+                        // P2_GLASS_SELF_OPACITY_MASKED=1 restores the old alpha test.
+                        let tex = opacity.and_then(|o| self.resolve(&cur.pkg, o)).and_then(|o| self.material_texture(&o)).and_then(|m| m.texture);
+                        // P2_SELF_OPACITY_BLEND=name,...: probe, blend these self-opacity shaders anyway.
+                        let force = std::env::var("P2_SELF_OPACITY_BLEND").ok().is_some_and(|v| {
+                            let n = cur.pkg.name(cur.pkg.exports[cur.export].name).to_ascii_lowercase();
+                            v.split(',').any(|f| !f.is_empty() && n.contains(&f.to_ascii_lowercase()))
+                        });
+                        match tex.filter(|t| force || (std::env::var_os("P2_GLASS_SELF_OPACITY_MASKED").is_none() && translucent_alpha(t))) {
+                            Some(t) => {
+                                info.opacity = Some(t);
+                                info.blended = true;
+                            }
+                            None => info.masked = true,
+                        }
                     } else if let Some(o) = opacity.and_then(|o| self.resolve(&cur.pkg, o)) {
                         info.opacity = self.material_texture(&o).and_then(|m| m.texture);
                         if info.opacity.is_some() {
@@ -212,6 +229,29 @@ impl Library {
         }
         None
     }
+}
+
+/// True when a texture's alpha is a translucency (glass), not a cut-out: under 1% of texels
+/// clear (alpha < 8) and at least half of them partial (8..248), on the top mip (small mips
+/// blur a cut-out lattice such as zo_kennel_fence_mask into partial alpha).
+/// zo_doorglass_opaque: 0% clear, 100% partial; CowPasture zo_grassline2_base: 32% clear.
+pub fn translucent_alpha(tex: &Obj) -> bool {
+    let Ok(t) = crate::texture::read_texture(&tex.pkg, tex.export) else { return false };
+    let Ok((_, _, px)) = t.decode_rgba(0) else { return false };
+    let n = px.len() / 4;
+    let clear = px.chunks_exact(4).filter(|c| c[3] < 8).count();
+    let partial = px.chunks_exact(4).filter(|c| (8..248).contains(&c[3])).count();
+    if std::env::var_os("P2_ALPHA_DEBUG").is_some() {
+        let low = t.decode_rgba(3).ok().map(|(_, _, p)| {
+            let m = p.len() / 4;
+            (p.chunks_exact(4).filter(|c| (32..224).contains(&c[3])).count() * 100 / m.max(1), p.chunks_exact(4).filter(|c| c[3] >= 128).count() * 100 / m.max(1))
+        });
+        let under: f32 = px.chunks_exact(4).filter(|c| c[3] < 8).map(|c| (c[0] as f32 + c[1] as f32 + c[2] as f32) / 3.0).sum::<f32>() / clear.max(1) as f32;
+        let solid: Vec<&[u8]> = px.chunks_exact(4).filter(|c| c[3] >= 248).collect();
+        let over: f32 = solid.iter().map(|c| (c[0] as f32 + c[1] as f32 + c[2] as f32) / 3.0).sum::<f32>() / solid.len().max(1) as f32;
+        eprintln!("translucent_alpha {}: {}x{} n {n} clear {clear} partial {partial} rgb_under_clear {under:.0} rgb_solid {over:.0} mip3 (partial%, >=128%) {low:?}", tex.pkg.name(tex.pkg.exports[tex.export].name), t.width, t.height);
+    }
+    n > 0 && clear * 100 < n && partial * 2 >= n
 }
 
 fn first_array_object(props: &crate::Properties, name: &str) -> Option<ObjRef> {

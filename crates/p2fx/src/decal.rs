@@ -26,6 +26,9 @@ pub struct DecalSpec {
     pub rotation: [i32; 3],
     pub half_w: f32,
     pub half_h: f32,
+    /// tan(FOV/2): half size grows by this per unit of depth (perspective frustum, apex behind
+    /// the actor). 0 = orthographic box (FOV 0).
+    pub spread: f32,
     pub depth: f32,
     pub texture: Option<Arc<TexData>>,
     pub style: DrawStyle,
@@ -115,6 +118,15 @@ impl DecalSpec {
             rotation: vm.actor_rot(a),
             half_w: w * ds * ds3.y.abs() * 0.5,
             half_h: h * ds * ds3.z.abs() * 0.5,
+            // FOV > 0 is a perspective frustum (UE2 Projector: the image is USize x VSize *
+            // DrawScale at the actor and widens with depth). MilitaryBase's cell grille
+            // (Projector15, FOV 45, ~140 uu above the floor) drew ~1/3 too small, so less of
+            // the floor was lit than in the original (#52). P2FX_PROJ_ORTHO=1 = old box.
+            spread: vm
+                .get_prop(a, "FOV")
+                .map(|v| v.as_int() as f32)
+                .filter(|f| *f > 1.0 && std::env::var_os("P2FX_PROJ_ORTHO").is_none())
+                .map_or(0.0, |f| (f.min(179.0).to_radians() * 0.5).tan()),
             depth,
             texture,
             style,
@@ -142,7 +154,9 @@ impl DecalSpec {
         for &a in grid {
             for &b in grid {
                 let o = self.location + fy * (a * self.half_w * 0.98) + fz * (b * self.half_h * 0.98);
-                if let Some(h) = world.trace(o - fx * 8.0, o + fx * self.depth, &p2collide::Shape::POINT, targets) {
+                // Along the frustum edge direction (fx for a box).
+                let dir = fx + (fy * a + fz * b) * (self.spread * 0.98);
+                if let Some(h) = world.trace(o - fx * 8.0, o + dir * self.depth, &p2collide::Shape::POINT, targets) {
                     let d = (h.location - self.location).dot(fx);
                     far = Some(far.map_or(d, |f: f32| f.max(d)));
                 } else {
@@ -160,9 +174,10 @@ impl DecalSpec {
         let to_local = Mat3::from_cols(fx, fy, fz).transpose();
         let mut lo = Vec3::splat(f32::MAX);
         let mut hi = Vec3::splat(f32::MIN);
+        let grow = depth.max(0.0) * self.spread;
         for x in [near, depth] {
-            for y in [-self.half_w, self.half_w] {
-                for z in [-self.half_h, self.half_h] {
+            for y in [-self.half_w - grow, self.half_w + grow] {
+                for z in [-self.half_h - grow, self.half_h + grow] {
                     let p = self.location + fx * x + fy * y + fz * z;
                     lo = lo.min(p);
                     hi = hi.max(p);
@@ -187,10 +202,10 @@ impl DecalSpec {
             let local: Vec<Vec3> = t.iter().map(|&q| to_local * (q - self.location)).collect();
             let mut poly = clip(local, 0, near, depth);
             if poly.len() >= 3 {
-                poly = clip(poly, 1, -self.half_w, self.half_w);
+                poly = clip_sloped(poly, 1, self.half_w, self.spread);
             }
             if poly.len() >= 3 {
-                poly = clip(poly, 2, -self.half_h, self.half_h);
+                poly = clip_sloped(poly, 2, self.half_h, self.spread);
             }
             if poly.len() < 3 {
                 return;
@@ -199,7 +214,8 @@ impl DecalSpec {
             for q in &poly {
                 let w = self.location + fx * q.x + fy * q.y + fz * q.z + n * 0.4;
                 out.positions.push(to_bevy(w).to_array());
-                out.uv0.push([0.5 + q.y / (2.0 * self.half_w), 0.5 - q.z / (2.0 * self.half_h)]);
+                let g = q.x.max(0.0) * self.spread;
+                out.uv0.push([0.5 + q.y / (2.0 * (self.half_w + g)), 0.5 - q.z / (2.0 * (self.half_h + g))]);
                 out.uv1.push([0.0, 0.0]);
                 out.colors.push([1.0, 1.0, 1.0, 1.0]);
                 out.blend.push(0.0);
@@ -210,6 +226,32 @@ impl DecalSpec {
         });
         (!out.indices.is_empty()).then_some(out)
     }
+}
+
+/// Clip to |p[axis]| <= half + max(p.x, 0) * spread (perspective frustum sides; spread 0 = box).
+fn clip_sloped(mut poly: Vec<Vec3>, axis: usize, half: f32, spread: f32) -> Vec<Vec3> {
+    if spread == 0.0 {
+        return clip(poly, axis, -half, half);
+    }
+    for sign in [1.0f32, -1.0] {
+        let f = |p: &Vec3| sign * p[axis] - half - p.x.max(0.0) * spread;
+        let mut out = Vec::with_capacity(poly.len() + 2);
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let (fa, fb) = (f(&a), f(&b));
+            if fa <= 0.0 {
+                out.push(a);
+            }
+            if (fa <= 0.0) != (fb <= 0.0) {
+                out.push(a + (b - a) * (fa / (fa - fb)));
+            }
+        }
+        poly = out;
+        if poly.len() < 3 {
+            return vec![];
+        }
+    }
+    poly
 }
 
 /// Sutherland-Hodgman clip of a polygon to min <= p[axis] <= max.

@@ -13,6 +13,7 @@
 //! - `skip N`: press Space every 30 frames for N frames (cutscenes, screens)
 //! - `map NAME`: wait until the level is NAME
 //! - `look P`: set the view pitch (Unreal units, + is up) with mouse motion
+//! - `roam N [SEED]`: walk N seeded-random legs over the navigation network (benchmarks)
 //!
 //! Progress goes to stdout as `PILOT@frame ...` lines.
 
@@ -283,6 +284,45 @@ fn pilot(
         d
     };
     match verb {
+        "roam" => {
+            // `roam N [SEED]`: queue N `go` steps to navigation nodes 500..2500 units apart,
+            // picked by a fixed-seed generator so every run (benchmark A/B) walks the same route.
+            let (n, seed) = arg.split_once(' ').map(|(a, b)| (a, b.trim())).unwrap_or((arg, "1"));
+            let n: usize = n.parse().unwrap_or(8);
+            let mut s: u64 = seed.parse::<u64>().unwrap_or(1).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            let mut rnd = || {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                s
+            };
+            let mut legs = Vec::new();
+            if let Some(g) = vm.nav.graph.as_ref() {
+                let count = g.node_count() as u64;
+                let mut at = loc;
+                for _ in 0..n {
+                    if count == 0 {
+                        break;
+                    }
+                    let mut pick = None;
+                    for _ in 0..64 {
+                        let l = g.node_location((rnd() % count) as u32);
+                        let d = d2(at, l);
+                        if (500.0..2500.0).contains(&d) && (l[2] - at[2]).abs() < 300.0 {
+                            pick = Some(l);
+                            break;
+                        }
+                    }
+                    let Some(l) = pick else { continue };
+                    legs.push(format!("go {:.0},{:.0},{:.0} 120", l[0], l[1], l[2]));
+                    at = l;
+                }
+            }
+            println!("PILOT@{f} roam: {} legs", legs.len());
+            let at = p.step + 1;
+            p.steps.splice(at..at, legs);
+            next = true;
+        }
         "list" => {
             // `list CLASS`: print every live actor of that class, nearest first.
             let mut v: Vec<(f32, String, [f32; 3])> = vm
@@ -468,7 +508,18 @@ fn pilot(
                 vm.actors.iter().copied().filter(|&a| !vm.objects[a].deleted && vm.classes[vm.objects[a].class].name.eq_ignore_ascii_case(c)).nth(i)
             };
             let target_of = |vm: &Vm| point.or_else(|| nth(vm).or_else(|| p2game::demo::find_actor(vm, k)).map(|x| vm.actor_loc(x)));
-            if level_changed && t > 1 {
+            // A full-screen script screen (the Monday newspaper on leaving the trailer, map,
+            // news) holds the player in a *Screen state: tap Space as a player would to close it,
+            // and don't count the wait as being stuck.
+            let on_screen = pc.is_some_and(|c| vm.state_name(c).to_ascii_lowercase().contains("screen"));
+            if on_screen && !(level_changed && t > 1) {
+                if t % 30 == 1 {
+                    keys.write(key(KeyCode::Space, true));
+                    p.held.push(KeyCode::Space);
+                }
+                p.stuck_check_at = f + 90;
+                p.best_dist = f32::MAX;
+            } else if level_changed && t > 1 {
                 println!("PILOT@{f} go {k}: level changed to {map}");
                 next = true;
             } else if let (Some(_), Some(target)) = (pawn, target_of(vm)) {

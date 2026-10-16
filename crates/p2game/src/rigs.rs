@@ -218,8 +218,19 @@ pub fn pose_rigs(host: &GameHost, vm: &Vm, rigs: &Query<&VmRig>, tfs: &mut Query
     let c = c_mat();
     let ci = c.inverse();
     let mut anims = host.anims.borrow_mut();
+    // `P2GAME_RIG_WATCH=ClassSubstr`: about once a second, the matching rigs' state.
+    let watch = std::env::var("P2GAME_RIG_WATCH").ok().map(|s| s.to_ascii_lowercase());
+    let tick = vm.level.and_then(|l| vm.get_prop(l, "TimeSeconds")).map(|v| v.as_float()).unwrap_or(0.0);
+    static WATCH_FRAME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let wf = WATCH_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     for r in rigs.iter() {
         let hidden = render_hidden(vm, r.actor);
+        if let Some(w) = &watch {
+            if wf % 60 == 0 && vm.classes[vm.objects[r.actor].class].name.to_ascii_lowercase().contains(w.as_str()) {
+                let sec_vis: Vec<String> = r.sections.iter().filter_map(|&s| vis.get(s).ok().map(|v| format!("{v:?}"))).collect();
+                println!("RIGWATCH t={tick:.2} {} hidden {hidden} loc {:?} anim {} sections {:?}", vm.object_name(r.actor), vm.actor_loc(r.actor), anims.contains_key(&r.actor), sec_vis);
+            }
+        }
         for &s in &r.sections {
             if let Ok(mut v) = vis.get_mut(s) {
                 let want = if hidden { Visibility::Hidden } else { Visibility::Inherited };

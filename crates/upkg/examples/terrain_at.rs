@@ -67,6 +67,43 @@ fn main() {
         let vis: Vec<String> = (0..64).filter(|z| lf.visible_zones & (1u64 << z) != 0).map(|z| zname(Some(z))).collect();
         println!("leaf {l} zone {} visible_zones {:#x}: {}", lf.zone, lf.visible_zones, vis.join(" "));
     }
+    if std::env::var("ZHIST").is_ok() {
+        // Visible terrain vertices per BSP zone (sampled 4 uu above the surface), with each zone's ambient.
+        let amb = |z: usize| -> String {
+            match m.zones.get(z) {
+                Some(ObjRef::Export(i)) => begin_object(&pkg, *i)
+                    .ok()
+                    .map(|(_, q)| {
+                        let b = |n: &str, d: u8| match q.get(n) {
+                            Some(upkg::Value::Byte(v)) => *v,
+                            _ => d,
+                        };
+                        format!("b{} h{} s{}", b("AmbientBrightness", 0), b("AmbientHue", 0), b("AmbientSaturation", 255))
+                    })
+                    .unwrap_or_default(),
+                _ => "-".into(),
+            }
+        };
+        for ti in upkg::terrain::find_terrains(&pkg) {
+            let Ok(t) = upkg::terrain::read_terrain(&lib, &pkg, ti) else { continue };
+            let mut per: std::collections::BTreeMap<Option<usize>, (usize, [f32; 3])> = Default::default();
+            for y in 0..t.height - 1 {
+                for x in 0..t.width - 1 {
+                    if !t.quad_visible(x, y) {
+                        continue;
+                    }
+                    let v = t.vertex(x, y);
+                    let e = per.entry(zone_of(&m, [v[0], v[1], v[2] + 4.0])).or_insert((0, v));
+                    e.0 += 1;
+                }
+            }
+            println!("terrain {}", t.name);
+            for (z, (n, at)) in per {
+                println!("  {n:6} verts zone {} amb {} e.g. {:.0},{:.0},{:.0}", zname(z), z.map(amb).unwrap_or_default(), at[0], at[1], at[2]);
+            }
+        }
+        return;
+    }
     if std::env::var("SCAN").is_ok() {
         // Visible quads whose centre (just above the surface) lies in a zone without bTerrainZone.
         let tz: Vec<bool> = m.zones.iter().map(|o| match o {

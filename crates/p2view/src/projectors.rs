@@ -60,6 +60,30 @@ fn clip(mut poly: Vec<Vec3>, axis: usize, min: f32, max: f32) -> Vec<Vec3> {
     poly
 }
 
+/// Clip to |p[axis]| <= half + p.x * spread (a perspective frustum side pair; spread 0 = box).
+fn clip_sloped(mut poly: Vec<Vec3>, axis: usize, half: f32, spread: f32) -> Vec<Vec3> {
+    for sign in [1.0f32, -1.0] {
+        // Signed distance, inside when <= 0.
+        let f = |p: &Vec3| sign * p[axis] - half - p.x * spread;
+        let mut out = Vec::with_capacity(poly.len() + 2);
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            let (fa, fb) = (f(&a), f(&b));
+            if fa <= 0.0 {
+                out.push(a);
+            }
+            if (fa <= 0.0) != (fb <= 0.0) {
+                out.push(a + (b - a) * (fa / (fa - fb)));
+            }
+        }
+        poly = out;
+        if poly.len() < 3 {
+            return vec![];
+        }
+    }
+    poly
+}
+
 /// Builds decal geometry for every level-static Projector that projects onto BSP.
 pub fn build_projectors(lib: &Library, map: &std::sync::Arc<Package>, model: &Model) -> Vec<DecalData> {
     let mut out = Vec::new();
@@ -79,6 +103,10 @@ pub fn build_projectors(lib: &Library, map: &std::sync::Arc<Package>, model: &Mo
         let ds = p.float("DrawScale").unwrap_or(1.0);
         let (hw, hh) = (size.0 * ds * 0.5, size.1 * ds * 0.5);
         let depth = p.int("MaxTraceDistance").unwrap_or(1000) as f32;
+        // FOV > 0: perspective frustum, the image is USize x VSize * DrawScale at the actor and
+        // widens by tan(FOV/2) per unit of depth (as p2fx decal.rs). P2VIEW_PROJ_ORTHO=1 = box.
+        let fov = p.int("FOV").unwrap_or(0).clamp(0, 179) as f32;
+        let spread = if fov > 1.0 && std::env::var_os("P2VIEW_PROJ_ORTHO").is_none() { (fov.to_radians() * 0.5).tan() } else { 0.0 };
         let loc = Vec3::from(p.vector("Location").unwrap_or([0.0; 3]));
         let (fx, fy, fz) = rot_axes(p.rotator("Rotation").unwrap_or([0; 3]));
         let to_local = Mat3::from_cols(fx, fy, fz).transpose();
@@ -106,11 +134,11 @@ pub fn build_projectors(lib: &Library, map: &std::sync::Arc<Package>, model: &Mo
             if poly.is_empty() {
                 continue;
             }
-            poly = clip(poly, 1, -hw, hw);
+            poly = clip_sloped(poly, 1, hw, spread);
             if poly.is_empty() {
                 continue;
             }
-            poly = clip(poly, 2, -hh, hh);
+            poly = clip_sloped(poly, 2, hh, spread);
             if poly.len() < 3 {
                 continue;
             }
@@ -120,7 +148,7 @@ pub fn build_projectors(lib: &Library, map: &std::sync::Arc<Package>, model: &Mo
                 let w = loc + fx * q.x + fy * q.y + fz * q.z + nrm * 0.15;
                 d.positions.push(w.to_array());
                 d.normals.push(nrm.to_array());
-                d.uvs.push([0.5 + q.y / (2.0 * hw), 0.5 - q.z / (2.0 * hh)]);
+                d.uvs.push([0.5 + q.y / (2.0 * (hw + q.x * spread)), 0.5 - q.z / (2.0 * (hh + q.x * spread))]);
             }
             for k in 1..poly.len() as u32 - 1 {
                 d.indices.extend([start, start + k, start + k + 1]);

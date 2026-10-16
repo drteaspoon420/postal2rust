@@ -113,11 +113,7 @@ impl SoundCache {
 
     /// Decodes a loose music file (Ogg Vorbis or WAV) by name, searching `Music\`.
     pub fn music(&mut self, game: &Path, song: &str) -> Option<Arc<SoundData>> {
-        let mut cands = vec![PathBuf::from(song), upkg::ci::join(game, Path::new("Music").join(song))];
-        if Path::new(song).extension().is_none() {
-            cands.push(upkg::ci::join(game, Path::new("Music").join(format!("{song}.ogg"))));
-        }
-        let path = cands.into_iter().find(|p| p.is_file())?;
+        let path = music_path(game, song)?;
         if let Some(s) = self.music.get(&path) {
             return s.clone();
         }
@@ -125,6 +121,21 @@ impl SoundCache {
         self.music.insert(path, d.clone());
         d
     }
+
+    /// Stores a music file decoded elsewhere (a worker thread preparing the next level's songs).
+    /// An entry already present is kept.
+    pub fn insert_music(&mut self, path: PathBuf, data: Option<Arc<SoundData>>) {
+        self.music.entry(path).or_insert(data);
+    }
+}
+
+/// The file [`SoundCache::music`] would decode for `song`.
+pub fn music_path(game: &Path, song: &str) -> Option<PathBuf> {
+    let mut cands = vec![PathBuf::from(song), upkg::ci::join(game, Path::new("Music").join(song))];
+    if Path::new(song).extension().is_none() {
+        cands.push(upkg::ci::join(game, Path::new("Music").join(format!("{song}.ogg"))));
+    }
+    cands.into_iter().find(|p| p.is_file())
 }
 
 /// Decodes an Ogg Vorbis or WAV file to stereo/mono f32.

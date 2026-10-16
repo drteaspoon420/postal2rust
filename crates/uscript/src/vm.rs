@@ -245,7 +245,10 @@ impl Ty {
     fn sub(&self, seg: &Seg) -> Option<&Ty> {
         match (self, seg) {
             (Ty::Array(i) | Ty::Fixed(i, _), Seg::Idx(_)) => Some(i),
-            (Ty::Struct(f), Seg::Field(n)) => f.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, t)| t),
+            (Ty::Struct(f), Seg::Field(n)) => {
+                let n = n.as_str();
+                f.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, t)| t)
+            }
             _ => None,
         }
     }
@@ -276,6 +279,9 @@ pub struct ClassInfo {
     pub defaults: Vec<Value>,
     /// Lower-case property name to slot (the most derived declaration wins).
     pub slot_index: FastMap<Box<str>, usize>,
+    /// Case-insensitive name hash ([`name_hash`]) to slot; `None` if two of the class's property
+    /// names collide (then lookups use `slot_index`).
+    pub slot_hash: Option<FastMap<u64, usize>>,
 }
 
 /// Runs `f` on an ASCII-lowercased copy of `s` without allocating for short names.
@@ -305,6 +311,43 @@ pub(crate) fn name_hash(s: &str) -> u64 {
 
 impl ClassInfo {
     pub fn slot(&self, name: &str) -> Option<usize> {
+        // Host code reads properties by name, mostly with string literals, thousands of times a
+        // frame. A small direct-mapped cache keyed by (class, name address, length) answers repeat
+        // lookups without hashing the name. A hit is confirmed by an exact compare of the slot's
+        // name, so a reused address or a different class at the same address can never return
+        // a wrong slot (it just misses). Missing properties are not cached.
+        const N: usize = 4096;
+        thread_local! {
+            static CACHE: std::cell::RefCell<Vec<(usize, usize, u32)>> = std::cell::RefCell::new(vec![(0, 0, u32::MAX); N]);
+        }
+        // The slots buffer address is stable for a class's lifetime (the classes Vec may move
+        // the ClassInfo itself when it grows).
+        let (cp, np) = (self.slots.as_ptr() as usize, name.as_ptr() as usize);
+        let idx = ((cp >> 4).wrapping_mul(0x9E37_79B9) ^ np.wrapping_mul(0x85EB_CA6B) ^ name.len()) % N;
+        let hit = CACHE.with(|c| {
+            let e = c.borrow()[idx];
+            (e.0 == cp && e.1 == np && e.2 != u32::MAX).then_some(e.2 as usize)
+        });
+        if let Some(s) = hit {
+            if self.slots.get(s).is_some_and(|x| x.name == name) {
+                return Some(s);
+            }
+        }
+        let r = self.slot_uncached(name);
+        if let Some(s) = r {
+            CACHE.with(|c| c.borrow_mut()[idx] = (cp, np, s as u32));
+        }
+        r
+    }
+
+    fn slot_uncached(&self, name: &str) -> Option<usize> {
+        // Host code reads properties by name every frame (~5% of the main thread): hash the name
+        // case-insensitively in one pass instead of lowercasing it into a buffer first. The slot
+        // found is checked against the name, so an unknown name that hashes like a property
+        // still returns None.
+        if let Some(h) = &self.slot_hash {
+            return h.get(&name_hash(name)).copied().filter(|&i| self.slots[i].name.eq_ignore_ascii_case(name));
+        }
         with_lower(name, |l| self.slot_index.get(l).copied())
     }
     /// A default property value by name (`None` if the class has no such property).
@@ -316,10 +359,78 @@ impl ClassInfo {
     }
 }
 
+/// Incarnation source for [`Slots`] generations (taken once per storage creation): the high
+/// bits of a generation, so storage created later (a new object at a reused id, a level
+/// reload, a clone) never repeats an earlier storage's generation values.
+static SLOTS_INCARNATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// An object's property storage. Reads go through `Deref` to the vector; every mutable access
+/// (`IndexMut`, `get_mut`, `iter_mut`, `DerefMut`, ...) goes through [`Slots::deref_mut`],
+/// which advances the write generation first. Mutation is impossible without advancing it, so
+/// an unchanged [`Slots::generation`] means no property of the object was written in between
+/// (hosts use this to skip re-reading unchanged actors). Generation = incarnation << 40 |
+/// write count.
+#[derive(Debug)]
+pub struct Slots {
+    values: Vec<Value>,
+    wgen: u64,
+}
+
+impl Slots {
+    pub fn new(values: Vec<Value>) -> Self {
+        Slots { values, wgen: SLOTS_INCARNATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) << 40 }
+    }
+
+    /// Write generation: changes whenever any slot may have been modified.
+    pub fn generation(&self) -> u64 {
+        self.wgen
+    }
+
+    pub fn to_vec(&self) -> Vec<Value> {
+        self.values.clone()
+    }
+}
+
+impl std::ops::DerefMut for Slots {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Vec<Value> {
+        self.wgen = self.wgen.wrapping_add(1);
+        &mut self.values
+    }
+}
+
+impl Clone for Slots {
+    fn clone(&self) -> Self {
+        // A copy is a different storage: it gets its own generation.
+        Slots::new(self.values.clone())
+    }
+}
+
+impl std::ops::Deref for Slots {
+    type Target = Vec<Value>;
+    fn deref(&self) -> &Vec<Value> {
+        &self.values
+    }
+}
+
+impl From<Vec<Value>> for Slots {
+    fn from(v: Vec<Value>) -> Self {
+        Slots::new(v)
+    }
+}
+
+impl<'a> IntoIterator for &'a Slots {
+    type Item = &'a Value;
+    type IntoIter = std::slice::Iter<'a, Value>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.values.iter()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Object {
     pub class: ClassId,
-    pub slots: Vec<Value>,
+    pub slots: Slots,
     /// Current state, state code position and latent action.
     pub exec: StateFrame,
     /// Destroyed (actors only). Destroyed objects stay addressable; references to them are
@@ -412,8 +523,19 @@ enum Root {
 
 enum Seg {
     Idx(usize),
-    Field(String),
+    Field(SegName),
     Len,
+}
+
+/// A struct member name as an entry of a package's name table. Struct member access runs for
+/// nearly every script statement touching a vector/rotator/struct, and copying the name into a
+/// new String each time cost an allocation; holding the package (an Rc bump) avoids that.
+struct SegName(Rc<ScriptPackage>, ObjRef);
+
+impl SegName {
+    fn as_str(&self) -> &str {
+        self.0.pkg.ref_name(self.1)
+    }
 }
 
 struct Place {
@@ -502,6 +624,10 @@ pub struct Vm {
     /// a level reset can repoint any class default that still holds one.
     subobject_of: HashMap<ObjId, FieldId>,
     frames: Vec<Frame>,
+    /// Spare locals buffers of finished frames (see [`Vm::recycle_locals`]).
+    locals_pool: Vec<Vec<Value>>,
+    /// Spare call-argument buffers (see [`Vm::call_expr`]).
+    args_pool: Vec<Vec<Value>>,
     host: Rc<dyn Host>,
     native_this: Option<ObjId>,
     native_class: Option<ClassId>,
@@ -574,6 +700,8 @@ impl Vm {
             subobjects: FastMap::default(),
             subobject_of: HashMap::new(),
             frames: Vec::new(),
+            locals_pool: Vec::new(),
+            args_pool: Vec::new(),
             host: Rc::new(DefaultHost),
             native_this: None,
             native_class: None,
@@ -913,7 +1041,23 @@ impl Vm {
                 slots.push(Slot { name: sp.export_name(c).to_string(), field: pf, ty, flags: p.flags });
             }
         }
-        let slot_index = slots.iter().enumerate().map(|(i, s)| (s.name.to_ascii_lowercase().into_boxed_str(), i)).collect();
+        let slot_index: FastMap<Box<str>, usize> = slots.iter().enumerate().map(|(i, s)| (s.name.to_ascii_lowercase().into_boxed_str(), i)).collect();
+        // Same mapping keyed by the name hash (the slot_index entry for each name: the most
+        // derived declaration). Dropped if two different names share a hash.
+        let slot_hash = {
+            let mut m: FastMap<u64, usize> = FastMap::default();
+            let mut ok = true;
+            for (name, &i) in &slot_index {
+                if let Some(&j) = m.get(&name_hash(name)) {
+                    if !slots[j].name.eq_ignore_ascii_case(name) {
+                        ok = false;
+                        break;
+                    }
+                }
+                m.insert(name_hash(name), i);
+            }
+            ok.then_some(m)
+        };
         // The package name with its declared capitalisation (the file stem may be lowercased).
         let package = sp.pkg.names.iter().find(|n| n.eq_ignore_ascii_case(&sp.pkg.name)).cloned().unwrap_or_else(|| sp.pkg.name.clone());
         let mut info = ClassInfo {
@@ -926,6 +1070,7 @@ impl Vm {
             slot_by_field,
             defaults,
             slot_index,
+            slot_hash,
         };
         let id = self.classes.len();
         let mut pending: Vec<Pending> = Vec::new();
@@ -1355,7 +1500,7 @@ impl Vm {
         if let Some(s) = ci.slot("Name") {
             slots[s] = Value::Name(format!("{}{id}", ci.name));
         }
-        self.objects.push(Object { class, slots, exec: StateFrame::default(), deleted: false });
+        self.objects.push(Object { class, slots: Slots::new(slots), exec: StateFrame::default(), deleted: false });
         id
     }
 
@@ -1484,13 +1629,25 @@ impl Vm {
         if self.frames.is_empty() {
             self.steps = 0;
         }
-        Ok(self.invoke(f, this, Some(class), args)?.0)
+        Ok(self.invoke_with(f, this, Some(class), args, false)?.0)
     }
 
     /// Invokes a function with evaluated arguments. Returns the result and final parameter values
     /// (for out-parameter write-back).
-    fn invoke(&mut self, f: FieldId, this: Option<ObjId>, class: Option<ClassId>, mut args: Vec<Value>) -> Result<(Value, Vec<Value>)> {
+    fn invoke(&mut self, f: FieldId, this: Option<ObjId>, class: Option<ClassId>, args: Vec<Value>) -> Result<(Value, Vec<Value>)> {
+        self.invoke_with(f, this, class, args, true)
+    }
+
+    /// [`Vm::invoke`]; with `want_params` false the final parameter values are not collected
+    /// (the returned Vec is empty) because the caller discards them (events, `call`).
+    fn invoke_with(&mut self, f: FieldId, this: Option<ObjId>, class: Option<ClassId>, args: Vec<Value>, want_params: bool) -> Result<(Value, Vec<Value>)> {
         let fi = self.func_info(f)?;
+        self.invoke_fi(f, fi, this, class, args, want_params)
+    }
+
+    /// [`Vm::invoke_with`] for a caller that already holds the function's info (saves the second
+    /// `funcs` lookup per call).
+    fn invoke_fi(&mut self, f: FieldId, fi: Rc<FuncInfo>, this: Option<ObjId>, class: Option<ClassId>, mut args: Vec<Value>, want_params: bool) -> Result<(Value, Vec<Value>)> {
         self.calls_total += 1;
         if fi.flags & func_flags::NATIVE != 0 {
             self.native_calls_total += 1;
@@ -1508,7 +1665,9 @@ impl Vm {
         if self.frames.len() > 250 {
             return err("script call stack overflow");
         }
-        let mut locals: Vec<Value> = fi.locals.iter().map(|l| l.2.zero()).collect();
+        // Reuse a locals buffer from an earlier call: one alloc/free pair less per script call.
+        let mut locals = self.locals_pool.pop().unwrap_or_default();
+        locals.extend(fi.locals.iter().map(|l| l.2.zero()));
         for (k, &li) in fi.params.iter().enumerate() {
             locals[li] = std::mem::replace(&mut args[k], Value::Void);
         }
@@ -1523,11 +1682,15 @@ impl Vm {
         self.frames.push(Frame { pkg: f.pkg as usize, this, class, locals, fi: Some(fi.clone()), iters: Vec::new() });
         let sp = self.pkgs[f.pkg as usize].clone();
         let script = &sp.function(f.export as usize).unwrap().base.script;
-        let r = self.exec(script, 0, Mode::Func, &fi.name);
-        let frame = self.frames.pop().unwrap();
-        let ret = match r? {
-            Flow::Return(Some(v)) => v,
-            _ => fi.ret.map(|i| frame.locals[i].clone()).unwrap_or(Value::Void),
+        let r = self.exec(script, 0, Mode::Func, &|| fi.name.clone());
+        let mut frame = self.frames.pop().unwrap();
+        let ret = match r {
+            Ok(Flow::Return(Some(v))) => v,
+            Ok(_) => fi.ret.map(|i| frame.locals[i].clone()).unwrap_or(Value::Void),
+            Err(e) => {
+                self.recycle_locals(frame.locals);
+                return Err(e);
+            }
         };
         if let Some(names) = call_trace() {
             if names.iter().any(|n| n.eq_ignore_ascii_case(&fi.name)) {
@@ -1536,11 +1699,27 @@ impl Vm {
                 eprintln!("CALL {}.{}({}) -> {} on {who}", fi.owner, fi.name, shown.join(", "), self.value_string(&ret));
             }
         }
-        let mut params: Vec<Value> = fi.params.iter().map(|&li| frame.locals[li].clone()).collect();
+        // The frame is gone, so parameter values are moved out instead of cloned. The argument
+        // Vec (emptied above) is reused as the result buffer.
+        args.clear();
+        if want_params || fi.watch.is_some() {
+            args.extend(fi.params.iter().map(|&li| std::mem::replace(&mut frame.locals[li], Value::Void)));
+        }
+        self.recycle_locals(frame.locals);
+        let mut params = args;
         if let Some(w) = fi.watch {
             w(self, this, &mut params, true);
         }
         Ok((ret, params))
+    }
+
+    /// Returns a frame's locals buffer to the pool (bounded, so a deep recursion does not keep
+    /// a large amount of memory around).
+    fn recycle_locals(&mut self, mut v: Vec<Value>) {
+        if self.locals_pool.len() < 64 && v.capacity() <= 256 {
+            v.clear();
+            self.locals_pool.push(v);
+        }
     }
 
     fn invoke_native(&mut self, fi: &FuncInfo, this: Option<ObjId>, class: Option<ClassId>, mut args: Vec<Value>) -> Result<(Value, Vec<Value>)> {
@@ -1583,13 +1762,15 @@ impl Vm {
     }
 
     /// Runs a statement list from `pc` until it returns, ends, or (state code) yields.
-    fn exec(&mut self, script: &Script, mut pc: usize, mode: Mode, what: &str) -> Result<Flow> {
-        let target = |off: u16| script.stmt_at(off as u32).ok_or_else(|| ScriptError::Bad(format!("jump to non-statement offset {off:#x} in {what}")));
+    /// `what` names the code for error messages. It is a closure so that callers (state code runs
+    /// every tick for every stateful actor) only pay for formatting the label when an error occurs.
+    fn exec(&mut self, script: &Script, mut pc: usize, mode: Mode, what: &dyn Fn() -> String) -> Result<Flow> {
+        let target = |off: u16| script.stmt_at(off as u32).ok_or_else(|| ScriptError::Bad(format!("jump to non-statement offset {off:#x} in {}", what())));
         while pc < script.stmts.len() {
             self.steps += 1;
             self.steps_total += 1;
             if self.steps > self.step_budget {
-                return err(format!("step budget exhausted in {what}"));
+                return err(format!("step budget exhausted in {}", what()));
             }
             if let Mode::State { obj, epoch } = mode {
                 if self.objects[obj].exec.generation != epoch {
@@ -1649,14 +1830,14 @@ impl Vm {
                     pc += 1;
                 }
                 Expr::GotoLabel(x) => {
-                    let Mode::State { obj, .. } = mode else { return err(format!("goto label outside state code in {what}")) };
+                    let Mode::State { obj, .. } = mode else { return err(format!("goto label outside state code in {}", what())) };
                     let label = self.eval(x, Ctx::Frame)?.as_name();
                     self.goto_label(obj, &label);
                     return Ok(Flow::Switched);
                 }
                 Expr::Assert { cond, line } => {
                     if !self.eval(cond, Ctx::Frame)?.as_bool() {
-                        return err(format!("assertion failed in {what} line {line}"));
+                        return err(format!("assertion failed in {} line {line}", what()));
                     }
                     pc += 1;
                 }
@@ -1697,9 +1878,12 @@ impl Vm {
                 None => return Ok(None),
             },
             Expr::VirtualFunction { name, args } => {
-                let fname = self.pkgs[pkg].pkg.name(*name as usize).to_string();
+                // Runs for every state-code statement that is a call: borrow the name from the
+                // package rather than copying it.
+                let sp = self.pkgs[pkg].clone();
+                let fname = sp.pkg.name(*name as usize);
                 let (this, class) = (self.frame().this, self.frame().class);
-                match class.and_then(|c| self.find_virtual(this, c, &fname)) {
+                match class.and_then(|c| self.find_virtual(this, c, fname)) {
                     Some(f) => (f, args),
                     None => return Ok(None),
                 }
@@ -1871,7 +2055,7 @@ impl Vm {
                 p
             }
             Expr::StructMember { prop, expr } => {
-                let name = self.pkgs[pkg].pkg.ref_name(*prop).to_string();
+                let name = SegName(self.pkgs[pkg].clone(), *prop);
                 let mut p = self.place(expr, ctx)?;
                 p.path.push(Seg::Field(name));
                 p
@@ -2155,13 +2339,14 @@ impl Vm {
                 self.call_expr(f, this, Some(class), args)?
             }
             Expr::GlobalFunction { name, args } => {
-                let fname = self.pkgs[pkg].pkg.name(*name as usize).to_string();
+                let sp = self.pkgs[pkg].clone();
+                let fname = sp.pkg.name(*name as usize);
                 let (this, class) = (self.ctx_obj(ctx), self.ctx_class(ctx));
                 let Some(class) = class else {
                     self.push_log(format!("Warning: Accessed None (call {fname})"));
                     return Ok(Value::Void);
                 };
-                let f = self.find_function(class, &fname).ok_or_else(|| ScriptError::Bad(format!("function {fname} not found")))?;
+                let f = self.find_function(class, fname).ok_or_else(|| ScriptError::Bad(format!("function {fname} not found")))?;
                 self.call_expr(f, this, Some(class), args)?
             }
             Expr::DelegateProperty(n) => {
@@ -2189,7 +2374,7 @@ impl Vm {
             other => {
                 // Variable-like expressions evaluated as values (e.g. a struct member of a call result).
                 if let Expr::StructMember { prop, expr } = other {
-                    let name = self.pkgs[pkg].pkg.ref_name(*prop).to_string();
+                    let name = SegName(self.pkgs[pkg].clone(), *prop);
                     let v = self.eval(expr, ctx)?;
                     return Ok(self.read(&Place { root: Root::Temp(v), path: vec![Seg::Field(name)] }));
                 }
@@ -2211,7 +2396,9 @@ impl Vm {
     /// Evaluates call arguments in the caller frame, invokes, and writes back out parameters.
     fn call_expr(&mut self, f: FieldId, this: Option<ObjId>, class: Option<ClassId>, args: &[Expr]) -> Result<Value> {
         let fi = self.func_info(f)?;
-        let mut vals = Vec::with_capacity(args.len());
+        // Argument buffers are pooled: every script-to-script and operator call used to allocate
+        // one. Natives and script calls hand the same Vec back as the parameter result.
+        let mut vals = self.args_pool.pop().unwrap_or_default();
         let mut outs = Vec::new();
         for (k, a) in args.iter().enumerate() {
             let flags = fi.params.get(k).map(|&li| fi.locals[li].1).unwrap_or(0);
@@ -2224,11 +2411,16 @@ impl Vm {
             }
         }
         let class = if fi.flags & func_flags::STATIC != 0 && class.is_none() { self.frame().class } else { class };
-        let (ret, params) = self.invoke(f, this, class, vals)?;
+        let (ret, mut params) = self.invoke_fi(f, fi, this, class, vals, !outs.is_empty())?;
         for (k, p) in outs {
-            if let Some(v) = params.get(k) {
-                self.write(&p, v.clone())?;
+            // Each out index appears once, so the value can be moved out.
+            if let Some(v) = params.get_mut(k) {
+                self.write(&p, std::mem::replace(v, Value::Void))?;
             }
+        }
+        if self.args_pool.len() < 64 && params.capacity() <= 64 {
+            params.clear();
+            self.args_pool.push(params);
         }
         Ok(ret)
     }
@@ -2308,9 +2500,9 @@ fn read_path(mut v: &Value, mut ty: Option<&Ty>, path: &[Seg]) -> Value {
             },
             (Seg::Len, Value::Array(a)) => return Value::Int(a.len() as i32),
             (Seg::Len, _) => return Value::Int(0),
-            (Seg::Field(n), Value::Vector(xyz)) => return Value::Float(vec_field(xyz, n)),
-            (Seg::Field(n), Value::Rotator(r)) => return Value::Int(rot_field(r, n)),
-            (Seg::Field(n), Value::Struct(f)) => match f.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)) {
+            (Seg::Field(n), Value::Vector(xyz)) => return Value::Float(vec_field(xyz, n.as_str())),
+            (Seg::Field(n), Value::Rotator(r)) => return Value::Int(rot_field(r, n.as_str())),
+            (Seg::Field(n), Value::Struct(f)) => match f.iter().find(|(k, _)| k.eq_ignore_ascii_case(n.as_str())) {
                 Some((_, x)) => x,
                 None => return Value::Void,
             },
@@ -2343,18 +2535,18 @@ fn write_path(mut v: &mut Value, mut ty: Option<&Ty>, path: &[Seg], val: Value) 
                 return;
             }
             (Seg::Field(n), Value::Vector(xyz)) => {
-                if let Some(c) = vec_index(n) {
+                if let Some(c) = vec_index(n.as_str()) {
                     xyz[c] = val.as_float();
                 }
                 return;
             }
             (Seg::Field(n), Value::Rotator(r)) => {
-                if let Some(c) = rot_index(n) {
+                if let Some(c) = rot_index(n.as_str()) {
                     r[c] = val.as_int();
                 }
                 return;
             }
-            (Seg::Field(n), Value::Struct(f)) => match f.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(n)) {
+            (Seg::Field(n), Value::Struct(f)) => match f.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(n.as_str())) {
                 Some((_, x)) => x,
                 None => return,
             },
@@ -2365,13 +2557,10 @@ fn write_path(mut v: &mut Value, mut ty: Option<&Ty>, path: &[Seg], val: Value) 
     *v = val;
 }
 
+// Vector/rotator member access (Location.X, Rotation.Yaw) runs constantly in script; compare
+// case-insensitively in place instead of allocating a lowercased copy of the name each time.
 fn vec_index(n: &str) -> Option<usize> {
-    match n.to_ascii_lowercase().as_str() {
-        "x" => Some(0),
-        "y" => Some(1),
-        "z" => Some(2),
-        _ => None,
-    }
+    ["x", "y", "z"].iter().position(|c| c.eq_ignore_ascii_case(n))
 }
 
 fn vec_field(v: &[f32; 3], n: &str) -> f32 {
@@ -2379,12 +2568,7 @@ fn vec_field(v: &[f32; 3], n: &str) -> f32 {
 }
 
 fn rot_index(n: &str) -> Option<usize> {
-    match n.to_ascii_lowercase().as_str() {
-        "pitch" => Some(0),
-        "yaw" => Some(1),
-        "roll" => Some(2),
-        _ => None,
-    }
+    ["pitch", "yaw", "roll"].iter().position(|c| c.eq_ignore_ascii_case(n))
 }
 
 fn rot_field(r: &[i32; 3], n: &str) -> i32 {

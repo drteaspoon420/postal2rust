@@ -367,7 +367,8 @@ impl Vm {
         if self.frames.is_empty() {
             self.steps = 0;
         }
-        Ok(Some(self.invoke(f, Some(obj), Some(class), args)?.0))
+        // Events discard the final parameter values, so do not collect them.
+        Ok(Some(self.invoke_with(f, Some(obj), Some(class), args, false)?.0))
     }
 
     /// Like [`Vm::call_event`], also returning the final parameter values (out parameters, e.g.
@@ -503,7 +504,8 @@ impl Vm {
                 self.objects[obj].exec.code = None;
                 return Ok(());
             };
-            let what = format!("state {} code", sp.export_name(sf.export as usize));
+            // Formatted only if the state code raises an error (see `Vm::exec`).
+            let what = || format!("state {} code", sp.export_name(sf.export as usize));
             if self.frames.is_empty() {
                 self.steps = 0;
             }

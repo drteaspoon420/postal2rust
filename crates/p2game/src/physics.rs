@@ -268,7 +268,14 @@ impl PhysHost {
             if dist > rad + r {
                 continue;
             }
-            if stop_at_wall && !self.world.borrow_mut().fast_trace(loc, center) {
+            // Wall check. Map-placed props (cars, pickups) often have their origin a few units
+            // under a terrain or floor surface; a strict line to the origin then hits the ground
+            // and a grenade next to a car never damaged it (the original blows such cars up,
+            // FIDELITY #26). Also accept a clear line to the top of the victim's cylinder.
+            if stop_at_wall && !self.world.borrow_mut().fast_trace(loc, center) && !(h > 0.0 && self.world.borrow_mut().fast_trace(loc + Vec3::Z * h, center)) {
+                if std::env::var_os("P2_HURT_TRACE").is_some() {
+                    eprintln!("HURT  blocked: {} center {center:.0} victim {loc:.0} h {h:.0}", vm.object_name(v));
+                }
                 continue;
             }
             let dir = (loc - center).normalize_or(Vec3::Z);
@@ -287,6 +294,9 @@ impl PhysHost {
             if !class_check.is_empty() {
                 let cn = vm.classes[vm.objects[v].class].name.to_ascii_lowercase();
                 class_hit |= class_check.contains(&cn);
+            }
+            if std::env::var_os("P2_HURT_TRACE").is_some() {
+                eprintln!("HURT {} -> {} dist {dist:.0} amount {amount:.1} mom {mom:.0}", vm.object_name(me), vm.object_name(v));
             }
             vm.fire_event(v, "TakeDamage", vec![Value::Int(amount as i32), Value::Object(inst), Value::Vector(hit_loc.to_array()), Value::Vector(mom.to_array()), dtype.clone()]);
             if alive {
@@ -681,6 +691,11 @@ impl PhysHost {
             println!("physics split ms/frame: register {:.2} pull {:.2} tick {:.2} flush {:.2}", t[0] / f, t[1] / f, t[2] / f, t[3] / f);
             self.timings.set([0.0; 4]);
         }
+        // `P2GAME_DIRTY_VERIFY`: running totals of the unchanged-actor pull skips and their checks.
+        if self.frames.get() % 300 == 0 && std::env::var_os("P2GAME_DIRTY_VERIFY").is_some() {
+            let (skipped, checked, bad) = self.bridge.borrow().dirty_stats();
+            println!("DIRTY_VERIFY frame {} skipped {skipped} checked {checked} mismatches {bad}", self.frames.get());
+        }
     }
 }
 
@@ -754,9 +769,13 @@ thread_local! {
 }
 
 /// Starts building `map`'s collision world on a worker thread, so it overlaps level
-/// instantiation and the begin-play scripts; [`install`] picks it up.
+/// instantiation and the begin-play scripts; [`install`] picks it up. A build already under way
+/// for the same map (a [`preload`] near a telepad) is kept.
 pub fn prefetch(lib: std::sync::Arc<upkg::library::Library>, map: std::sync::Arc<upkg::Package>) {
     if std::env::var_os("P2GAME_NO_PHYSICS").is_some() || std::env::var_os("P2GAME_NO_PREFETCH").is_some() {
+        return;
+    }
+    if PREFETCH.with(|p| p.borrow().as_ref().is_some_and(|(n, _)| n.eq_ignore_ascii_case(&map.name))) {
         return;
     }
     let name = map.name.clone();
@@ -766,10 +785,34 @@ pub fn prefetch(lib: std::sync::Arc<upkg::library::Library>, map: std::sync::Arc
     }
 }
 
+/// Name of the map whose collision world is being built ahead (see [`preload`]).
+pub fn preloading() -> Option<String> {
+    PREFETCH.with(|p| p.borrow().as_ref().map(|(n, _)| n.clone()))
+}
+
+/// Opens the map package at `path` and builds its collision world on a worker thread while the
+/// current level keeps playing (the player is near a level exit). A later travel to that map
+/// takes the result instead of building it (the collision world depends only on the package).
+pub fn preload(lib: std::sync::Arc<upkg::library::Library>, name: &str, path: std::path::PathBuf) {
+    if std::env::var_os("P2GAME_NO_PHYSICS").is_some() || std::env::var_os("P2GAME_NO_PREFETCH").is_some() {
+        return;
+    }
+    if preloading().is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+        return;
+    }
+    let h = std::thread::Builder::new().name("collision-preload".into()).spawn(move || {
+        let map = std::sync::Arc::new(upkg::Package::open(&path)?);
+        LoadedMap::load(&lib, &map)
+    });
+    if let Ok(h) = h {
+        PREFETCH.with(|p| *p.borrow_mut() = Some((name.to_string(), h)));
+    }
+}
+
 fn take_prefetched(lib: &upkg::library::Library, map: &std::sync::Arc<upkg::Package>) -> upkg::Result<LoadedMap> {
     let pre = PREFETCH.with(|p| p.borrow_mut().take());
     if let Some((name, h)) = pre {
-        if name == map.name {
+        if name.eq_ignore_ascii_case(&map.name) {
             if let Ok(r) = h.join() {
                 // The worker registered the map with its own handle; make sure the shared library
                 // knows it too (`load` does this as its first step on the calling thread).
@@ -812,6 +855,21 @@ pub fn install(host: &GameHost, vm: &mut Vm) -> Option<Rc<PhysHost>> {
         }
         if vm.get_prop(o, "StaticMesh").is_some_and(|v| v.as_resource().is_some()) {
             baked_exports.insert(o, export as u32);
+        }
+    }
+    // A loaded save has no actor for map static meshes destroyed before it was written
+    // (PrepActorsByGroup: other days, holidays): their baked triangles must not collide.
+    // (On a fresh level load level_objects has every map export, so nothing is removed here.)
+    {
+        let mut gone = 0;
+        for e in m.world.level.actor_exports() {
+            if !objects.contains_key(&(e as usize)) {
+                m.world.level.remove_actor(e);
+                gone += 1;
+            }
+        }
+        if gone > 0 {
+            eprintln!("physics: {gone} map static mesh actors absent from the level (destroyed before save) stop colliding");
         }
     }
     let mut registered = 0;

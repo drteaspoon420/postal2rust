@@ -90,6 +90,9 @@ fn level_hook(host: &GameHost, vm: &mut Vm) {
     a.moving.borrow_mut().clear();
     a.occl.borrow_mut().clear();
     ISA.with(|m| m.borrow_mut().clear());
+    LPC.with(|c| c.set((usize::MAX, None)));
+    PAWNS.with(|p| p.borrow_mut().0 = (usize::MAX, None));
+    HIDDEN_SLOTS.with(|s| s.borrow_mut().clear());
     let a2 = a.clone();
     let hp: *const GameHost = host;
     host.frame_hooks.borrow_mut().push(Box::new(move |vm, dt| {
@@ -118,6 +121,13 @@ fn level_time(vm: &Vm) -> f32 {
 }
 
 thread_local! {
+    /// Cached [`local_player_controller`]: (actor count when found, controller).
+    static LPC: std::cell::Cell<(usize, Option<ObjId>)> = const { std::cell::Cell::new((usize::MAX, None)) };
+    /// Per class: slots of bHidden, AttachmentBone and Base for [`render_hidden`].
+    static HIDDEN_SLOTS: RefCell<Vec<Option<(Option<usize>, Option<usize>, Option<usize>)>>> = const { RefCell::new(Vec::new()) };
+}
+
+thread_local! {
     /// `P2GAME_AI_TIMING=1`: per-stage perception timings on stderr every frame.
     static AI_TIMING: bool = std::env::var_os("P2GAME_AI_TIMING").is_some();
     /// `class_is_a` results per (class, name): the perception passes ask the same few questions of
@@ -128,6 +138,26 @@ thread_local! {
 fn is_a(vm: &Vm, a: ObjId, class: &'static str) -> bool {
     let c = vm.objects[a].class;
     ISA.with(|m| *m.borrow_mut().entry((c, class)).or_insert_with(|| vm.class_is_a(c, class)))
+}
+
+thread_local! {
+    /// Pawns among `vm.actors`, keyed by (actor count, last actor). Actors are only appended
+    /// (spawns) or compacted (cleanup, level load), and either changes the key; a pawn destroyed
+    /// without a cleanup is filtered by the `deleted` check on every use.
+    static PAWNS: RefCell<((usize, Option<ObjId>), Vec<ObjId>)> = RefCell::new(((usize::MAX, None), Vec::new()));
+}
+
+/// Live pawns in actor order (what a full `vm.actors` scan for `Pawn` returns).
+fn cached_pawns(vm: &Vm) -> Vec<ObjId> {
+    let key = (vm.actors.len(), vm.actors.last().copied());
+    PAWNS.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.0 != key {
+            p.1 = vm.actors.iter().copied().filter(|&a| is_a(vm, a, "Pawn")).collect();
+            p.0 = key;
+        }
+        p.1.iter().copied().filter(|&a| vm.objects.get(a).is_some_and(|o| !o.deleted)).collect()
+    })
 }
 
 /// Unreal rotator to forward vector.
@@ -160,6 +190,41 @@ fn eye(vm: &Vm, p: ObjId) -> Vec3 {
 /// attachments (heads, boltons, weapon attachments) render as part of their base mesh, so a
 /// body hidden by script (slider stasis) takes its head with it.
 pub fn render_hidden(vm: &Vm, a: ObjId) -> bool {
+    // Called for every rig, dynamic mesh and emitter every frame: resolve the three slots once per
+    // class (bHidden, AttachmentBone, Base) instead of three name lookups per hop. The table is
+    // cleared with each level (`level_hook`), so reloaded class ids can't hit stale slots.
+    let slots = |c: usize| {
+        HIDDEN_SLOTS.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.len() <= c {
+                s.resize(c + 1, None);
+            }
+            *s[c].get_or_insert_with(|| {
+                let ci = &vm.classes[c];
+                (ci.slot("bHidden"), ci.slot("AttachmentBone"), ci.slot("Base"))
+            })
+        })
+    };
+    let mut cur = a;
+    for _ in 0..8 {
+        let Some(o) = vm.objects.get(cur).filter(|o| !o.deleted) else { return true };
+        let (sh, sb, sbase) = slots(o.class);
+        let get = |s: Option<usize>| s.and_then(|i| o.slots.get(i));
+        if get(sh).is_some_and(|v| v.as_bool()) {
+            return true;
+        }
+        let on_bone = matches!(get(sb), Some(Value::Name(n)) if !n.is_empty() && !n.eq_ignore_ascii_case("None"));
+        match get(sbase).and_then(|v| v.as_obj()).filter(|&b| vm.objects.get(b).is_some_and(|x| !x.deleted)) {
+            Some(b) if on_bone && b != cur => cur = b,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// [`render_hidden`] by name lookups (reference for the slot-cached version).
+#[allow(dead_code)]
+fn render_hidden_slow(vm: &Vm, a: ObjId) -> bool {
     let mut cur = a;
     for _ in 0..8 {
         if vm.objects.get(cur).is_none_or(|o| o.deleted) || pb(vm, cur, "bHidden") {
@@ -177,6 +242,24 @@ pub fn render_hidden(vm: &Vm, a: ObjId) -> bool {
 /// The local human player's controller: a PlayerController that is not a `Camera` (Camera
 /// subclasses PlayerController in UE2), preferring one that possesses a pawn.
 pub fn local_player_controller(vm: &Vm) -> Option<ObjId> {
+    // Called by several hooks every frame; scanning all ~5700 actors each time showed up in
+    // profiles. Reuse the last answer while the actor list has the same length and the cached
+    // controller is alive and still possesses a pawn; anything else rescans.
+    let n = vm.actors.len();
+    let (len, cached) = LPC.with(|c| c.get());
+    if len == n {
+        if let Some(c) = cached {
+            if vm.objects.get(c).is_some_and(|o| !o.deleted) && is_a(vm, c, "PlayerController") && !is_a(vm, c, "Camera") && obj(vm, c, "Pawn").is_some() {
+                return Some(c);
+            }
+        }
+    }
+    let r = local_player_controller_scan(vm);
+    LPC.with(|c| c.set((n, r)));
+    r
+}
+
+fn local_player_controller_scan(vm: &Vm) -> Option<ObjId> {
     let pcs: Vec<ObjId> = vm.actors.iter().copied().filter(|&a| !vm.objects[a].deleted && is_a(vm, a, "PlayerController") && !is_a(vm, a, "Camera")).collect();
     pcs.iter().copied().find(|&c| obj(vm, c, "Pawn").is_some()).or_else(|| pcs.first().copied())
 }
@@ -382,7 +465,7 @@ impl Ai {
         let t0 = std::time::Instant::now();
         let now = level_time(vm);
         let view = local_view(vm);
-        let pawns: Vec<ObjId> = vm.actors.iter().copied().filter(|&a| !vm.objects[a].deleted && is_a(vm, a, "Pawn")).collect();
+        let pawns: Vec<ObjId> = cached_pawns(vm);
         let t_scan = t0.elapsed();
         let mut st = self.stats.borrow_mut();
         // 1. Rendered this frame: pawns the player's camera can see.

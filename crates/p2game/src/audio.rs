@@ -305,6 +305,8 @@ impl Audio {
 
     /// Music file decoded from `Music\` (Ogg).
     fn music_data(&self, song: &str) -> Option<Arc<SoundData>> {
+        // Songs a preload worker already decoded (player was near a level exit).
+        crate::preload::take_decoded_music();
         self.cache.borrow_mut().music(&self.game_dir, song)
     }
 

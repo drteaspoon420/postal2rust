@@ -27,6 +27,7 @@ use upkg::Package;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod launch;
+mod sampler;
 #[cfg(feature = "window")]
 mod cinema_view;
 #[cfg(feature = "window")]
@@ -61,6 +62,8 @@ mod splash;
 mod weapons;
 #[cfg(feature = "window")]
 mod window;
+#[cfg(feature = "window")]
+mod window_memory;
 #[cfg(feature = "window")]
 mod zone_fog;
 
@@ -126,11 +129,22 @@ fn main() {
         std::process::exit(2);
     }
     p2game::host::register_level_hook(p2game::physics::level_hook);
+    // Near a level exit, build the destination's collision world ahead (P2GAME_NO_PRELOAD=1: off).
+    p2game::preload::install();
     // Sound (silent engine unless the window attaches a device) and movies/Matinee for every level.
     if std::env::var_os("P2GAME_NO_AUDIO").is_none() {
         // The windowed game plays through the default output device (`--mute`: silent).
+        // Scripted runs (tests, screenshots, perf captures: any P2GAME_SHOTS/EXIT/EXEC/REAL/
+        // EXIT_SECS, `--profile-secs`, `--screenshot`) and `P2GAME_MUTE=1` are always muted too; the
+        // audio engine still runs, so sound traces keep working. Only interactive play is audible.
         #[cfg(feature = "window")]
-        let windowed = !["--config", "--scan", "--boot-all", "--headless", "--smoke", "--progress", "--mute"].iter().any(|f| has(&a, f));
+        let scripted = ["P2GAME_MUTE", "P2GAME_SHOTS", "P2GAME_EXIT", "P2GAME_EXIT_SECS", "P2GAME_EXEC", "P2GAME_REAL", "P2GAME_DEMO_GOTO"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+            || has(&a, "--profile-secs")
+            || has(&a, "--screenshot");
+        #[cfg(feature = "window")]
+        let windowed = !scripted && !["--config", "--scan", "--boot-all", "--headless", "--smoke", "--progress", "--mute"].iter().any(|f| has(&a, f));
         #[cfg(not(feature = "window"))]
         let windowed = false;
         if windowed {
@@ -392,8 +406,18 @@ fn boot_one(world: World, lv: Level, args: &Args, echo: bool) -> (Game, f32) {
         game.world.vm.fire_event(pc, "TravelPostAccept", vec![]);
     }
     game.drain_log(echo);
-    for _ in 0..args.frames {
+    // `P2GAME_PROFILE_TICKS=1`: profile only the world ticks (not begin play) and print each tick's time.
+    let tick_times = std::env::var_os("P2GAME_PROFILE_TICKS").is_some();
+    if tick_times {
+        game.world.vm.profile_natives.clear();
+        game.world.vm.profile_events.clear();
+    }
+    for i in 0..args.frames {
+        let t = Instant::now();
         game.tick(1.0 / 30.0);
+        if tick_times {
+            println!("tick {i}: {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);
+        }
         game.drain_log(echo);
         for l in p2game::save::process_requests(&mut game) {
             println!("{l}");

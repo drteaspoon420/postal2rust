@@ -134,7 +134,14 @@ pub struct DynMeshTracker {
     /// Level actors p2view did not draw but that have a static mesh (class-default StaticMesh).
     level_extra: HashSet<ObjId>,
     /// Static lighting for level_extra actors (built at level load).
-    lighting: Option<ActorLighting>,
+    lighting: Option<std::sync::Arc<ActorLighting>>,
+    /// Bake-ahead of the level pickups' vertex colours, started at level load on a worker (see
+    /// [`DynMeshTracker::start_bake_ahead`]). Taken on the first frame that bakes.
+    ahead: Option<std::thread::JoinHandle<Vec<(BakeKey, Vec<[f32; 4]>)>>>,
+    /// Finished bake-ahead results, keyed by their exact inputs, and the collision world they were
+    /// traced against (held so its address, part of the key, cannot be reused).
+    ahead_done: HashMap<BakeKey, Vec<[f32; 4]>>,
+    ahead_coll: Option<std::sync::Arc<p2collide::World>>,
     /// Highest actor id handled at load (everything at or below it is a level actor or skipped).
     floor: Option<ObjId>,
     actors: HashMap<ObjId, DynActor>,
@@ -157,7 +164,61 @@ impl DynMeshTracker {
 
     /// Static lighting data for the level's pickups (zones and lights of the loaded map).
     pub fn set_lighting(&mut self, lighting: ActorLighting) {
-        self.lighting = Some(lighting);
+        self.lighting = Some(std::sync::Arc::new(lighting));
+        self.ahead = None;
+        self.ahead_done.clear();
+        self.ahead_coll = None;
+    }
+
+    /// Starts baking every level pickup's vertex colours on a worker thread, from the inputs the
+    /// first frame will see (actor, mesh, transform, the level collision). The frame that draws
+    /// them takes a result only when its own inputs are bit-identical (a pickup moved or swapped
+    /// by level-start script is baked on the spot as before), and waits for the worker rather
+    /// than show unbaked pickups, so the result is the same as without it.
+    /// `P2GAME_NO_BAKE_AHEAD=1` turns it off.
+    pub fn start_bake_ahead(&mut self, lib: &std::sync::Arc<Library>, vm: &Vm, map: &upkg::Package, level_actors: &[(usize, ObjId)], player: Option<ObjId>) {
+        if std::env::var_os("P2GAME_NO_BAKE_AHEAD").is_some() || std::env::var_os("P2GAME_DYN_DYNAMIC").is_some() {
+            return;
+        }
+        let Some(lit) = self.lighting.clone() else { return };
+        // Candidates: level actors that draw a static mesh their map entry does not save (the
+        // ones `level_loaded` will hand to this module). A wrong guess only costs worker time.
+        let inputs: Vec<(ObjId, String, Vec3, Mat4)> = level_actors
+            .iter()
+            .filter(|(e, _)| !upkg::begin_object(map, *e).ok().is_some_and(|(_, p)| p.object("StaticMesh").is_some()))
+            .filter_map(|&(_, a)| static_mesh_path(vm, a, player).map(|p| (a, p.to_string(), Vec3::from(vm.actor_loc(a)), actor_world(vm, a))))
+            .collect();
+        if inputs.is_empty() {
+            return;
+        }
+        let lib = lib.clone();
+        let coll = p2game::physics::level_collision();
+        self.ahead_coll = coll.clone();
+        let t0 = std::time::Instant::now();
+        let h = std::thread::Builder::new().name("bake-ahead".into()).spawn(move || {
+            let jobs: Vec<BakeJob> = inputs.iter().filter_map(|(a, path, loc, w)| bake_geo(&lib, path, &lit).map(|g| (*a, *loc, *w, g))).collect();
+            let keys: Vec<BakeKey> = inputs.iter().filter(|(_, path, _, _)| bake_geo(&lib, path, &lit).is_some()).map(|(a, path, loc, w)| bake_key(*a, path, *loc, *w, coll.as_ref())).collect();
+            let colors = bake_colors_with(&lit, coll.as_deref(), &jobs);
+            if std::env::var_os("P2GAME_BOOT_TIMING").is_some() {
+                println!("dynmesh: bake-ahead of {} pickups done in {:.0} ms", jobs.len(), t0.elapsed().as_secs_f64() * 1e3);
+            }
+            keys.into_iter().zip(colors).collect()
+        });
+        self.ahead = h.ok();
+    }
+
+    /// Results of the bake-ahead (waits for the worker if it is still running).
+    fn take_ahead(&mut self) {
+        if let Some(h) = self.ahead.take() {
+            let t = std::time::Instant::now();
+            if let Ok(r) = h.join() {
+                self.ahead_done.extend(r);
+            }
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            if ms > 1.0 && std::env::var_os("P2GAME_SPIKES").is_some() {
+                println!("dynmesh: waited {ms:.1} ms for the bake-ahead");
+            }
+        }
     }
 
     pub fn level_extra_count(&self) -> usize {
@@ -303,23 +364,39 @@ impl DynMeshTracker {
 /// Bake input for one pickup: (actor, location, world matrix, mesh vertices/normals).
 type BakeJob = (ObjId, Vec3, Mat4, std::sync::Arc<(Vec<[f32; 3]>, Vec<[f32; 3]>)>);
 
-fn bake_job(lib: &Library, vm: &Vm, a: ObjId, path: &str, lit: &ActorLighting) -> Option<BakeJob> {
-    // Parse each mesh once per level (suburbs-3 bakes ~470 pickups at load).
-    let geo = lit.geo_cache.lock().unwrap_or_else(|p| p.into_inner()).entry(path.to_string()).or_insert_with(|| {
+/// Exact inputs of one bake (actor, mesh path, location and matrix bits, collision world): two
+/// bakes with the same key give the same colours.
+type BakeKey = (ObjId, String, [u32; 3], [u32; 16], usize);
+
+fn bake_key(a: ObjId, path: &str, loc: Vec3, w: Mat4, coll: Option<&std::sync::Arc<p2collide::World>>) -> BakeKey {
+    let m = w.to_cols_array();
+    (a, path.to_string(), loc.to_array().map(f32::to_bits), std::array::from_fn(|i| m[i].to_bits()), coll.map_or(0, |c| std::sync::Arc::as_ptr(c) as usize))
+}
+
+/// Parsed vertices/normals of a static mesh (cached per level in the lighting).
+fn bake_geo(lib: &Library, path: &str, lit: &ActorLighting) -> Option<std::sync::Arc<(Vec<[f32; 3]>, Vec<[f32; 3]>)>> {
+    lit.geo_cache.lock().unwrap_or_else(|p| p.into_inner()).entry(path.to_string()).or_insert_with(|| {
         let obj = resolve_path(lib, path, Some("StaticMesh"))?;
         let sm = upkg::staticmesh::read_static_mesh(&obj.pkg, obj.export).ok()?;
         Some(std::sync::Arc::new((sm.positions, sm.normals)))
-    }).clone()?;
+    }).clone()
+}
+
+fn bake_job(lib: &Library, vm: &Vm, a: ObjId, path: &str, lit: &ActorLighting) -> Option<BakeJob> {
+    // Parse each mesh once per level (suburbs-3 bakes ~470 pickups at load).
+    let geo = bake_geo(lib, path, lit)?;
     // actor_world is in Unreal space, as are the mesh's own vertices and normals.
     Some((a, Vec3::from(vm.actor_loc(a)), actor_world(vm, a), geo))
 }
 
+fn bake_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16)
+}
+
 /// Vertex colours for many pickups. The light visibility traces (~4 ms per actor, 364 lights
 /// on suburbs-3) dominate, and each actor is independent, so spread them over threads.
-fn bake_colors(lit: &ActorLighting, jobs: &[BakeJob]) -> Vec<Vec<[f32; 4]>> {
-    let coll = p2game::physics::level_collision();
-    let coll = coll.as_deref();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+fn bake_colors_with(lit: &ActorLighting, coll: Option<&p2collide::World>, jobs: &[BakeJob]) -> Vec<Vec<[f32; 4]>> {
+    let threads = bake_threads();
     let chunk = jobs.len().div_ceil(threads).max(1);
     std::thread::scope(|s| {
         let hs: Vec<_> = jobs.chunks(chunk).map(|c| s.spawn(move || c.iter().map(|(a, loc, w, g)| lit.vertex_light(coll, *a, *loc, *w, &g.0, &g.1)).collect::<Vec<_>>())).collect();
@@ -362,7 +439,7 @@ fn bake_sections(commands: &mut Commands, colors: Vec<[f32; 4]>, sections: &[Ent
     });
 }
 
-fn static_mesh_path(vm: &Vm, a: ObjId, player: Option<ObjId>) -> Option<String> {
+fn static_mesh_path(vm: &Vm, a: ObjId, player: Option<ObjId>) -> Option<&str> {
     if !matches!(vm.get_prop(a, "DrawType"), Some(Value::Byte(DT_STATIC_MESH))) {
         return None;
     }
@@ -390,7 +467,7 @@ fn static_mesh_path(vm: &Vm, a: ObjId, player: Option<ObjId>) -> Option<String> 
             return None;
         }
     }
-    vm.get_prop(a, "StaticMesh").and_then(|v| v.as_resource()).map(|s| s.to_string())
+    vm.get_prop(a, "StaticMesh").and_then(|v| v.as_resource())
 }
 
 /// True if `a`'s Base chain reaches `pawn`.
@@ -436,14 +513,32 @@ pub fn update(
     let floor = tracker.floor;
     // New or changed actors: only ids above the load floor (the object table only grows).
     let mut want: Vec<(ObjId, String)> = Vec::new();
-    for &a in &vm.actors {
-        if (floor.is_some_and(|f| a <= f) && !tracker.level_extra.contains(&a)) || vm.objects[a].deleted || tracker.level_actors.contains(&a) {
-            continue;
+    // Candidates that draw a static mesh this frame (the place pass below reuses it rather than
+    // evaluating `static_mesh_path` a second time per actor; the VM does not change in between).
+    let mut drawn: HashSet<ObjId> = HashSet::with_capacity(tracker.actors.len() + 8);
+    // Candidates: actors spawned after the load (id above the floor) plus the level's extra mesh
+    // actors. Testing the other ~5000 level actors against two hash sets every frame was a
+    // measurable part of the frame; the floor test alone rejects them.
+    let mut consider = |a: ObjId, want: &mut Vec<(ObjId, String)>| {
+        if vm.objects.get(a).is_none_or(|o| o.deleted) || tracker.level_actors.contains(&a) {
+            return;
         }
         if let Some(p) = static_mesh_path(vm, a, player) {
+            drawn.insert(a);
             if tracker.actors.get(&a).is_none_or(|d| d.mesh_path != p) {
-                want.push((a, p));
+                want.push((a, p.to_string()));
             }
+        }
+    };
+    for &a in &vm.actors {
+        if floor.is_some_and(|f| a <= f) {
+            continue;
+        }
+        consider(a, &mut want);
+    }
+    if floor.is_some() {
+        for &a in &tracker.level_extra {
+            consider(a, &mut want);
         }
     }
     if want.len() > 4 && std::env::var_os("P2GAME_SPIKES").is_some() {
@@ -484,9 +579,43 @@ pub fn update(
         tracker.spawned += 1;
         tracker.actors.insert(a, DynActor { mesh_path: path, sections, last: None });
     }
-    if let (false, Some(lit)) = (bakes.is_empty(), tracker.lighting.as_ref()) {
-        let jobs: Vec<BakeJob> = bakes.iter().map(|(j, _)| j.clone()).collect();
-        for (colors, (job, sections)) in bake_colors(lit, &jobs).into_iter().zip(&bakes) {
+    if let (false, Some(lit)) = (bakes.is_empty(), tracker.lighting.clone()) {
+        // Bake-ahead results for jobs whose inputs match exactly; the rest are baked here.
+        tracker.take_ahead();
+        let coll = p2game::physics::level_collision();
+        let mut colors_for: Vec<Option<Vec<[f32; 4]>>> = Vec::with_capacity(bakes.len());
+        let mut todo: Vec<BakeJob> = Vec::new();
+        for (job, _) in &bakes {
+            let hit = if tracker.ahead_done.is_empty() { None } else { tracker.ahead_done.remove(&bake_key(job.0, &tracker.actors[&job.0].mesh_path, job.1, job.2, coll.as_ref())) };
+            if hit.is_none() {
+                todo.push(job.clone());
+            }
+            colors_for.push(hit);
+        }
+        let n_ahead = bakes.len() - todo.len();
+        if std::env::var_os("P2GAME_BAKE_VERIFY").is_some() && n_ahead > 0 {
+            // Re-bake the bake-ahead hits here and compare bit for bit.
+            let hits: Vec<(usize, BakeJob)> = colors_for.iter().zip(&bakes).enumerate().filter(|(_, (c, _))| c.is_some()).map(|(i, (_, (j, _)))| (i, j.clone())).collect();
+            let jobs: Vec<BakeJob> = hits.iter().map(|(_, j)| j.clone()).collect();
+            let sync = bake_colors_with(&lit, coll.as_deref(), &jobs);
+            let bits = |v: &[[f32; 4]]| v.iter().flat_map(|c| c.map(f32::to_bits)).collect::<Vec<u32>>();
+            let bad = hits.iter().zip(&sync).filter(|((i, _), s)| bits(colors_for[*i].as_deref().unwrap_or_default()) != bits(s)).count();
+            println!("dynmesh: bake-ahead verify: {} of {n_ahead} hits {}", n_ahead - bad, if bad == 0 { "IDENTICAL" } else { "DIFFER" });
+        }
+        let mut fresh = bake_colors_with(&lit, coll.as_deref(), &todo).into_iter();
+        if std::env::var_os("P2GAME_SPIKES").is_some() && n_ahead > 0 {
+            println!("dynmesh: {n_ahead} of {} pickup bakes from the bake-ahead", bakes.len());
+        }
+        let dump = std::env::var_os("P2GAME_BAKE_DUMP");
+        for (pre, (job, sections)) in colors_for.into_iter().zip(&bakes) {
+            let colors = pre.unwrap_or_else(|| fresh.next().unwrap_or_default());
+            if let Some(path) = &dump {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let bytes: Vec<u8> = colors.iter().flat_map(|c| c.iter().flat_map(|x| x.to_le_bytes())).collect();
+                    let _ = writeln!(f, "{} {} {}", vm.object_name(job.0), colors.len(), bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+                }
+            }
             if std::env::var_os("P2GAME_DYNMESH").is_some() && !colors.is_empty() {
                 let n = colors.len() as f32;
                 let (lo, hi) = colors.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), c| ([lo[0].min(c[0]), lo[1].min(c[1]), lo[2].min(c[2])], [hi[0].max(c[0]), hi[1].max(c[1]), hi[2].max(c[2])]));
@@ -500,7 +629,7 @@ pub fn update(
     let c = c_mat();
     let ci = c.inverse();
     tracker.actors.retain(|&a, d| {
-        let gone = vm.objects.get(a).is_none_or(|o| o.deleted) || static_mesh_path(vm, a, player).is_none();
+        let gone = vm.objects.get(a).is_none_or(|o| o.deleted) || !drawn.contains(&a);
         if gone {
             for &e in &d.sections {
                 commands.entity(e).despawn();

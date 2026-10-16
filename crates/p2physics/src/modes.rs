@@ -440,11 +440,23 @@ impl PhysWorld {
         let speed = self.max_speed(id);
         // Moving along the look direction climbs; acceleration perpendicular to the wall slides.
         let climb = info.climb_dir.normalize_or(Vec3::Z);
-        let along = accel.dot(info.look_dir.normalize_or(Vec3::X)) + accel.dot(climb);
-        let lateral = accel - climb * accel.dot(climb) - info.look_dir * accel.dot(info.look_dir);
+        let look = info.look_dir.normalize_or(Vec3::X);
+        let into_wall = accel.dot(look);
+        let along = into_wall + accel.dot(climb);
+        let lateral = accel - climb * accel.dot(climb) - look * into_wall;
         let mut v = climb * along.signum() * if along.abs() > 1e-3 { speed } else { 0.0 } + lateral.normalize_or_zero() * speed * 0.5 * (lateral.length() > 1e-3) as i32 as f32;
         if v.length() > speed {
             v = v.normalize() * speed;
+        }
+        // Pressing toward the ladder also moves the climber toward it (UE2 pushes into the
+        // ladder geometry): against the wall the slide stops it, and once it has climbed past the
+        // top it steps forward over the edge onto the roof and leaves the volume. Without this an
+        // AI heading for a roof target rose out of the top of the volume straight up, fell back
+        // in and re-grabbed, bobbing in the air (VincesHouse zombies on the house ladders).
+        // Pulling away from the ladder lets go of it the same way. Added after the climb clamp
+        // so the climb rate stays LadderSpeed.
+        if into_wall.abs() > 1e-3 && std::env::var_os("P2PHYS_OLD_LADDER").is_none() {
+            v += look * into_wall.signum() * speed * 0.5;
         }
         self.actor_mut(id).velocity = v;
         let mut pos = loc;
