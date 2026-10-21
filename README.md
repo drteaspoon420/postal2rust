@@ -115,6 +115,19 @@ Known differences from the original, roughly by impact:
 
 ## Building from source
 
+On Linux, with Rust stable and the ALSA, udev, Wayland and xkbcommon development
+libraries installed, place your game files in `postal2/` (containing `System/`,
+`Maps/` and `Textures/`) and run:
+
+```sh
+./play.sh
+```
+
+The launcher builds the release binary and starts it in a window. The first build
+requires network access to download Rust dependencies. Extra arguments are passed
+to the game, for example `./play.sh --map suburbs-1`. To use another install,
+set `POSTAL2_DIR=/path/to/POSTAL2Complete` when running the launcher.
+
 Windows, Rust stable with the `x86_64-pc-windows-gnullvm` target and [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) (no Visual Studio needed). `tools/cargo.bat` wraps cargo with that toolchain; edit the paths at its top for your machine.
 
 ```

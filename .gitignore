@@ -1,4 +1,5 @@
 ghidra_proj/
+/postal2/
 logs/
 target/
 *.png
