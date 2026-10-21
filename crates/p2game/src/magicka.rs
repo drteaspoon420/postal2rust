@@ -12,14 +12,17 @@ impl Plugin for MagickaPlugin {
         if !enabled() {
             return;
         }
-        app.insert_non_send(MagicState::default())
-            .add_systems(Startup, hud_setup)
-            .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
-            .add_systems(
-                Update,
-                tick.after(crate::ui::ui_frame)
-                    .before(crate::ui::follow_player),
-            );
+        app.insert_non_send(MagicState {
+            classic: option("--magicka-camera").is_some_and(|c| c.eq_ignore_ascii_case("classic")),
+            ..default()
+        })
+        .add_systems(Startup, hud_setup)
+        .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
+        .add_systems(
+            Update,
+            tick.after(crate::ui::ui_frame)
+                .before(crate::ui::follow_player),
+        );
     }
 }
 pub(crate) fn enabled() -> bool {
@@ -344,6 +347,15 @@ fn tick(
             return;
         }
     }
+    // Robe speed, queue slowdown and Haste drive first-person walking too.
+    let speed = if state.classic {
+        0.
+    } else {
+        wizard.body().max_speed
+            * wizard.body().speed_multiplier()
+            * p2magicka::UNREAL_UNITS_PER_METRE
+    };
+    vm.set_prop(pawn, "GroundSpeed", Value::Float(speed));
     // Magicka teleport, push and levitation results are resolved by Postal's
     // collision on the next movement frame.
     let delta = Vec3::from(p2magicka::to_postal(std::array::from_fn(|i| {
@@ -356,6 +368,7 @@ fn tick(
             Value::Vector((Vec3::from(position) + delta).to_array()),
         );
     }
+    let damage_type = Value::Class(vm.find_class("Engine", "DamageType").ok());
     for (&actor, mirror) in &mut state.mirrors {
         if vm.objects.get(actor).is_none_or(|o| o.deleted) {
             continue;
@@ -375,7 +388,7 @@ fn tick(
                     Value::Object(Some(pawn)),
                     Value::Vector(vm.actor_loc(actor)),
                     Value::Vector([0.; 3]),
-                    Value::Class(None),
+                    damage_type.clone(),
                 ],
             );
             mirror.remainder = damage - amount as f32;

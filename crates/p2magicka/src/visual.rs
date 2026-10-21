@@ -189,13 +189,15 @@ pub fn load(wizard: &WizardWorld) -> Result<Vec<Part>, String> {
 }
 
 /// Sample the exact animation controller used for cast/melee timing. Matrices
-/// are Magicka world metres; the Bevy host scales them to Postal world units.
+/// are world metres, matching the Postal renderer after its UU conversion.
 pub fn pose(wizard: &WizardWorld) -> Option<(Vec<Mat>, Vec<(i32, Mat)>)> {
     let avatar = wizard.avatar();
     let rig = avatar.rig.as_ref()?;
     let body = wizard.body();
     let world = magicka_runtime::character_pose::character_orientation(
-        &rig.static_transform,
+        &avatar
+            .character
+            .scaled_static_transform(&rig.static_transform),
         &body.orientation,
         body.position,
         body.height_offset(),

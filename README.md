@@ -26,6 +26,24 @@ Options:
 
 Requirements: Windows 10/11 64-bit, a GPU with Vulkan or DirectX 12, and a copy of POSTAL 2.
 
+## Magicka integration (in development)
+
+Local branch `magicka-in-postal2` hosts gameplay from the sibling Magicka rewrite
+in Postal maps. The initial bridge tests pass; the full integration is unfinished.
+See [progress and remaining work](MAGICKA-INTEGRATION.md) and
+[agent handoff](HANDOFF.md) for current verification and known gaps.
+
+```sh
+./play.sh --magicka --map suburbs-1
+./play.sh --magicka --map suburbs-1 --magicka-camera classic
+```
+
+This requires the sibling `../re-lab-starter/output/rewrite` source workspace and
+your own Magicka content. The local content folder is detected at
+`../re-lab-starter/target/Magicka/Content`; use `--magicka-content /path/to/Content`
+for a different install. F6 switches cameras. `--robe`, `--staff` and `--melee`
+select original template/item names. Camera-specific controls appear in the HUD.
+
 ## Keybinds
 
 The port reads your bindings from the game's own `User.ini` / `DefUser.ini`, so these are POSTAL 2's defaults and any rebinding in the Controls menu applies.

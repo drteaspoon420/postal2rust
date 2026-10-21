@@ -14,10 +14,30 @@ AI continue to run; the adapter must deliver combat through Postal pawn events.
 - Direct runtime host: real robe templates, equipment, animation and cast logic.
 - Collision conversion from Postal BSP, meshes and terrain to Magicka surfaces.
 - Mirrored Postal combat characters and damage delivery back to native scripts.
-- `--magicka`, `--magicka-content`, `--robe`, `--staff`, `--melee` options.
+- `--magicka`, `--magicka-content`, `--robe`, `--staff`, `--melee`, and
+  `--magicka-camera classic` options.
 - First-person aiming; F6 toggles a classic overhead view with mouse ground aim.
-- Integration tests for equipment, element combinations, healing, haste expiry
-  and an arcane beam hitting a hosted pawn; these require local Magicka content.
+- PASSED: one coordinate unit test and three local-content integration tests
+  covering robe/equipment geometry and textures, element combinations, healing,
+  Haste expiry, and an arcane beam damaging a hosted pawn.
+- The release build and actual windowed smoke checks are still pending.
+
+## Requirement-by-requirement evidence
+
+| Requirement | Current evidence | Still unproven |
+| --- | --- | --- |
+| Magicka player | Real PlayerAvatar, character definitions and SceneWorld; healing integration test passes | Incoming Postal damage, death, statuses, complete movement, persistence |
+| Spell casting | Native queue/combinations and beam-on-hosted-pawn tests pass | Every cast form/family in Postal, visuals/audio, damage events/geometry in live maps |
+| Staffs | Original staff data, model and texture loading tested on Wizard | Catalog selection, passives and every special working in Postal |
+| Melee weapons | Original melee model/data and native avatar attack path wired | Actual melee strikes, enchantments and all weapon behaviors in Postal |
+| Magicks | Native recognition/dispatch reused; Haste activation and expiry test passes | World/AI/physics/render/audio effects for the full native magick catalog |
+| Robes | Original Wizard rig, textured geometry and animation sampler loaded | Visual inspection, every robe's appearance and properties, selection/persistence |
+| First person | Compile-checked adapter with mouse aiming and held staff/weapon placement | Windowed feel, animation, sleeves, muzzle/hit alignment and full controls |
+| Classic camera | F6/CLI camera mode, mouse-plane aiming, original element/control layout | Actual framing, click movement, camera collision, indoor visibility and visual inspection |
+
+Passing the inherited simulation suite would not substitute for the missing host
+checks above. Source ownership remains with each repository; this branch currently
+requires the sibling Magicka rewrite workspace to build.
 
 ## Still required before claiming completion
 

@@ -42,15 +42,18 @@ This is work in progress. Do not call it complete or playable without testing.
 - Linux launcher syntax and git diff whitespace checks passed.
 - Initial integration check found and fixed collision index type (`i32`).
 - `CCACHE_DISABLE=1 cargo check --locked --offline -p p2game -j 2` PASSED.
-- **Gameplay checks have not passed yet.**
+- `cargo test --locked --offline -p p2magicka -j 2` PASSED: 1 unit test and
+  3 content-backed integration tests; no skips (0.27 s for integration execution).
+- **Windowed gameplay checks have not passed yet.**
 - A first dependency build is still running. `mlua-sys` initially failed because
   ccache attempted to write outside the sandbox; use `CCACHE_DISABLE=1`.
 - Builds run with `-j 2` because the Magicka source documents compiler crashes
   under high load. Do not launch more competing builds.
 
 Current tool session (must poll/revalidate; logs alone are not live evidence):
-- Session 40707: `CCACHE_DISABLE=1 cargo test --locked --offline -p p2magicka -j 2`
-  log `/tmp/p2magicka-tests.log`. This is the current rerun after lock and source fixes.
+- Session 66645: `CCACHE_DISABLE=1 cargo build --locked --offline --release -p p2game -j 2`
+  log `/tmp/postal-magicka-build.log`. Compiling the expanded Bevy dependency graph.
+- Session 40707 completed successfully (the four bridge tests above).
 - Prior sessions 51741 and 89342 ended with compilation errors already fixed.
   The subsequent integrated check (19287) succeeded.
 
@@ -60,12 +63,18 @@ cargo update.
 
 ## Immediate next steps
 
-1. Poll live sessions; inspect compiler diagnostics and fix them.
+1. Poll release build 66645; inspect compiler diagnostics and fix them.
+   Latest source edits since the passing check add `--magicka-camera classic`,
+   mode-specific control help, FP movement speed from robe/statuses/Haste,
+   concrete native DamageType, and size-aware pose sampling.
 2. Finish lock resolution offline, then use --locked on subsequent checks.
-3. Pass `p2magicka` tests against actual local content. They intentionally fail
+3. The `p2magicka` tests pass against actual local content. They intentionally fail
    instead of silently skipping when content is absent. Tests cover queue rules,
    robe/equipment geometry/textures, healing, Haste expiry, beam damage.
-4. Build p2game and run a real windowed integration check, capture both cameras.
+4. Once release builds, run `tools/magicka-smoke.sh`. It injects an arcane
+   cast and F6 camera switch, captures first person/cast/classic screenshots,
+   writes `out/magicka/windowed-smoke.log`, and exits automatically. Inspect
+   screenshots as well as logs; the script itself does not assert gameplay.
 5. Fix/complete incoming damage, spells/effects, controls, models/animation,
    NPC status/forces, world magicks, selection UI and persistence as listed in
    the integration document. Audit the full objective before completion.
@@ -74,5 +83,6 @@ Known adapter gaps include: damage from Postal to the wizard is not connected;
 spell visuals/audio are not
 bridged; native first-person weapons are suppressed but Magicka equipment pose
 and muzzle agreement need runtime review; NPC status and movement don't yet
-feed back to Postal; rebuilding on travel resets wizard state. The original
+feed back to Postal; rebuilding on travel resets wizard state. First-person GroundSpeed now follows the robe and body speed multiplier;
+this still needs a windowed check. The original
 full runtime being available does not prove these host capabilities work.
