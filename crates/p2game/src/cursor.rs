@@ -61,12 +61,12 @@ fn automated() -> bool {
     ["P2GAME_NO_GRAB", "P2GAME_EXEC", "P2GAME_PILOT", "P2GAME_REAL", "P2GAME_HOLD", "P2GAME_SHOTS", "P2GAME_EXIT", "P2GAME_DEMO_GOTO", "P2GAME_DEMO_LOOK"].iter().any(|v| std::env::var_os(v).is_some())
 }
 
-fn cursor_lock(ui: Option<Res<UiInput>>, dev: Option<Res<crate::devmenu::DevState>>, mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>, mut auto: Local<Option<bool>>) {
+fn cursor_lock(magic: Option<NonSend<crate::magicka::MagicState>>, ui: Option<Res<UiInput>>, dev: Option<Res<crate::devmenu::DevState>>, mut windows: Query<(&Window, &mut CursorOptions), With<PrimaryWindow>>, mut auto: Local<Option<bool>>) {
     let auto = *auto.get_or_insert_with(automated);
     let Ok((win, mut cur)) = windows.single_mut() else { return };
     let dev_open = dev.is_some_and(|d| d.open || d.editor);
     let look = ui.is_some_and(|u| u.game_look && !u.captured);
-    let want = !auto && win.focused && look && !dev_open;
+    let want = !auto && win.focused && look && !dev_open && !magic.is_some_and(|s| s.classic);
     // Locked (relative motion, stays in place) where supported, else confined to the window.
     let mode = if want {
         if cfg!(windows) { CursorGrabMode::Confined } else { CursorGrabMode::Locked }

@@ -61,6 +61,8 @@ mod splash;
 #[cfg(feature = "window")]
 mod weapons;
 #[cfg(feature = "window")]
+mod magicka;
+#[cfg(feature = "window")]
 mod window;
 #[cfg(feature = "window")]
 mod window_memory;

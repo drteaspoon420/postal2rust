@@ -61,6 +61,7 @@ pub(crate) fn install(app: &mut App, sim: &mut Sim, game_root: &std::path::Path)
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ui_frame(
+    magic: Option<NonSend<crate::magicka::MagicState>>,
     mut sim: NonSendMut<Sim>,
     mut ui: NonSendMut<UiState>,
     mut hud: ResMut<HudCanvas>,
@@ -79,6 +80,7 @@ pub(crate) fn ui_frame(
     let (w, h) = (win.physical_width().max(1) as i32, win.physical_height().max(1) as i32);
     let dt = time.delta_secs().clamp(0.0, 0.2);
     let mut events = p2input::bevy_map::collect_events(&keys, &mouse, motion.delta, scroll.delta.y, &[]);
+    crate::magicka::filter_events(&mut events, capture.captured, magic.as_ref().is_some_and(|s| s.classic));
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let mut typed: Vec<char> = keys.get_just_pressed().filter_map(|k| keycode_char(*k, shift)).collect();
     let mut mouse_pos = win.cursor_position().map(|p| (p.x, p.y));

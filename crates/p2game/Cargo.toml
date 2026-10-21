@@ -7,6 +7,7 @@ version.workspace = true
 
 [dependencies]
 upkg.workspace = true
+p2magicka = { path = "../p2magicka", optional = true }
 uscript = { path = "../uscript" }
 p2nav = { path = "../p2nav" }
 p2anim = { path = "../p2anim" }
@@ -35,7 +36,7 @@ mimalloc = { version = "0.1", default-features = false }
 [features]
 default = ["window"]
 # Windowed mode (Bevy + p2view). Build with --no-default-features for a headless-only binary.
-window = ["dep:p2view", "dep:bevy", "dep:p2fx", "p2sound/device", "dep:p2canvas", "dep:p2input", "dep:winit"]
+window = ["dep:p2magicka", "dep:p2view", "dep:bevy", "dep:p2fx", "p2sound/device", "dep:p2canvas", "dep:p2input", "dep:winit"]
 # Chrome-trace spans for every Bevy system and render phase (writes trace-*.json in the cwd).
 # Build with `--features trace` into a separate target dir; open the file in ui.perfetto.dev.
 trace = ["window", "bevy/trace_chrome"]

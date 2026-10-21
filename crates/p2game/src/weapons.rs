@@ -824,6 +824,7 @@ fn fp_weapon(
         })
     });
     canvas.draws = statics;
+    let draws = if crate::magicka::enabled() { Vec::new() } else { draws };
     if let Ok(w) = windows.single() {
         WINDOW_SIZE.with(|s| s.set((w.physical_width().max(1), w.physical_height().max(1))));
         p2game::viewport::set_size(w.physical_width(), w.physical_height());

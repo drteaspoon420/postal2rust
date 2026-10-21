@@ -1,0 +1,13 @@
+[package]
+name = "p2magicka"
+description = "Magicka rewrite gameplay hosted inside Postal 2"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+magicka-runtime = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-runtime" }
+magicka-sim = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-sim" }
+magicka-content = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-content" }
+
+magicka-xnb = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-xnb" }

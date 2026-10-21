@@ -262,6 +262,7 @@ pub fn run(cfg: BootConfig, args: Args) {
         .add_plugins(crate::cursor::CursorPlugin)
         .add_plugins(crate::cinema_view::CinemaViewPlugin)
         .add_plugins(crate::weapons::WeaponsPlugin)
+        .add_plugins(crate::magicka::MagickaPlugin)
         .add_plugins(crate::realinput::RealInputPlugin)
         .add_plugins(crate::pilot::PilotPlugin)
         .add_plugins(crate::tour::TourPlugin)
@@ -284,7 +285,7 @@ pub fn run(cfg: BootConfig, args: Args) {
         .add_systems(
             Update,
             (
-                (load_scene, tag_level_entities, tick_script, travel, merge_statics, crate::ui::ui_frame, spawn_rigs, sync_transforms, dyn_meshes, pose_rigs, crate::ui::hide_own_body, frame_npc, fly_camera, crate::ui::follow_player, crate::cinema_view::apply_cinema_view, cam_override).chain(),
+                (load_scene, tag_level_entities, tick_script, travel, merge_statics, crate::ui::ui_frame, spawn_rigs, sync_transforms, dyn_meshes, pose_rigs, crate::ui::hide_own_body, frame_npc, fly_camera, crate::ui::follow_player, crate::magicka::camera, crate::cinema_view::apply_cinema_view, cam_override).chain(),
                 (crate::zone_fog::zone_fog, crate::debug::update_overlay, report, capture, mesh_census, perf_hide).chain(),
             )
                 .chain(),

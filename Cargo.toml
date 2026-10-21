@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/upkg", "crates/p2view", "crates/p2audio", "crates/p2anim", "crates/uscript", "crates/p2nav", "crates/p2game", "crates/p2canvas", "crates/p2collide", "crates/p2physics", "crates/p2fx", "crates/p2input", "crates/p2sound", "crates/p2movie", "crates/p2matinee", "crates/p2save"]
+members = ["crates/p2magicka", "crates/upkg", "crates/p2view", "crates/p2audio", "crates/p2anim", "crates/uscript", "crates/p2nav", "crates/p2game", "crates/p2canvas", "crates/p2collide", "crates/p2physics", "crates/p2fx", "crates/p2input", "crates/p2sound", "crates/p2movie", "crates/p2matinee", "crates/p2save"]
 
 [workspace.package]
 edition = "2024"
