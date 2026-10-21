@@ -63,6 +63,8 @@ mod weapons;
 #[cfg(feature = "window")]
 mod magicka;
 #[cfg(feature = "window")]
+mod offscreen;
+#[cfg(feature = "window")]
 mod window;
 #[cfg(feature = "window")]
 mod window_memory;
@@ -143,6 +145,7 @@ fn main() {
         let scripted = ["P2GAME_MUTE", "P2GAME_SHOTS", "P2GAME_EXIT", "P2GAME_EXIT_SECS", "P2GAME_EXEC", "P2GAME_REAL", "P2GAME_DEMO_GOTO"]
             .iter()
             .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+            || has(&a, "--offscreen")
             || has(&a, "--profile-secs")
             || has(&a, "--screenshot");
         #[cfg(feature = "window")]

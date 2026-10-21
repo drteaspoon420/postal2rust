@@ -6,6 +6,10 @@ use p2magicka::{Loadout, PlayerInput, WizardWorld, magicka_runtime::avatar::Avat
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
 
+// Default Wizard has 1000 HP; Postal's default player has 100. This host
+// conversion keeps a gunshot's relative strength while retaining robe stats.
+const HEALTH_SCALE: f32 = 10.;
+
 pub(crate) struct MagickaPlugin;
 impl Plugin for MagickaPlugin {
     fn build(&self, app: &mut App) {
@@ -44,6 +48,9 @@ fn content_dir() -> PathBuf {
 pub(crate) struct MagicState {
     pub world: Option<WizardWorld>,
     map: String,
+    pawn: Option<ObjId>,
+    published_health: Option<i32>,
+    death_delivered: bool,
     error: Option<String>,
     mirrors: HashMap<ObjId, Mirror>,
     pub(crate) classic: bool,
@@ -133,7 +140,7 @@ fn tick(
         return;
     }
     let level_key = format!("{}:{}", sim.game.level.map.name, sim.game.level_serial);
-    if state.map != level_key {
+    if state.map != level_key || state.pawn != Some(pawn) {
         state.map = level_key;
         state.error = None;
         state.mirrors.clear();
@@ -155,6 +162,15 @@ fn tick(
                         "MAGICKA: hosted wizard and Postal collision for {}",
                         state.map
                     );
+                    let health = (world.avatar().character.combat.health.hit_points / HEALTH_SCALE)
+                        .ceil() as i32;
+                    sim.game
+                        .world
+                        .vm
+                        .set_prop(pawn, "Health", Value::Int(health));
+                    state.published_health = Some(health);
+                    state.pawn = Some(pawn);
+                    state.death_delivered = false;
                     state.world = Some(world);
                 }
                 Err(error) => {
@@ -178,6 +194,7 @@ fn tick(
         return;
     };
     let vm = &mut sim.game.world.vm;
+    p2game::damage_bridge::register(pawn);
     let position = vm.actor_loc(pawn);
     let rotation = vm
         .get_prop(pc, "Rotation")
@@ -255,7 +272,7 @@ fn tick(
                     .get_prop(actor, "CollisionHeight")
                     .map(Value::as_float)
                     .unwrap_or(40.);
-                match wizard.attach_pawn(pos, hp * 10., radius, height) {
+                match wizard.attach_pawn(pos, hp * HEALTH_SCALE, radius, height) {
                     Ok(handle) => {
                         state.mirrors.insert(
                             actor,
@@ -274,12 +291,67 @@ fn tick(
             }
             let mirror = &mut state.mirrors.get_mut(&actor).unwrap();
             if let Some(npc) = wizard.world.npcs.get_mut(&mirror.handle) {
-                npc.character.combat.health.hit_points += (hp - mirror.health) * 10.;
+                npc.character.combat.health.hit_points += (hp - mirror.health) * HEALTH_SCALE;
                 let body = &mut wizard.world.physics.bodies[npc.body];
                 body.move_to(p2magicka::to_magicka(pos), body.orientation);
                 body.velocity = [0.; 3];
             }
             mirror.health = hp;
+        }
+    }
+    // The existing VM TakeDamage watch consumes the original hit before
+    // Postal can kill the player; Magicka owns shields, robes and statuses.
+    let incoming = p2game::damage_bridge::take(pawn);
+    let last_hit = incoming.last().cloned();
+    for hit in incoming {
+        let element = postal_damage_element(vm, hit.damage_type);
+        let attacker = hit.instigator.and_then(|a| {
+            if a == pawn {
+                Some(wizard.avatar().handle)
+            } else {
+                state.mirrors.get(&a).map(|m| m.handle)
+            }
+        });
+        wizard.receive_damage(
+            p2magicka::magicka_sim::damage::Damage {
+                attack: p2magicka::magicka_sim::damage::attack::DAMAGE
+                    | if element == p2magicka::magicka_sim::spells::Elements::EARTH {
+                        0
+                    } else {
+                        p2magicka::magicka_sim::damage::attack::STATUS
+                    },
+                element: element.0,
+                amount: hit.amount * HEALTH_SCALE,
+                magnitude: 1.,
+            },
+            attacker,
+            p2magicka::to_magicka(hit.location),
+        );
+        println!(
+            "MAGICKA INCOMING amount={} element={:?}",
+            hit.amount, element
+        );
+    }
+    // Native food/medkits and direct health changes remain useful to a wizard.
+    let native_health = vm.get_prop(pawn, "Health").map(Value::as_int).unwrap_or(0);
+    if let Some(previous) = state.published_health {
+        let difference = native_health - previous;
+        if difference != 0 {
+            let element = if difference > 0 {
+                p2magicka::magicka_sim::spells::Elements::LIFE
+            } else {
+                p2magicka::magicka_sim::spells::Elements::EARTH
+            };
+            wizard.receive_damage(
+                p2magicka::magicka_sim::damage::Damage {
+                    attack: p2magicka::magicka_sim::damage::attack::DAMAGE,
+                    element: element.0,
+                    amount: -(difference as f32) * HEALTH_SCALE,
+                    magnitude: 1.,
+                },
+                None,
+                wizard.body().position,
+            );
         }
     }
     let dt = time.delta_secs().clamp(0., 0.05);
@@ -347,6 +419,32 @@ fn tick(
             return;
         }
     }
+    let health = (wizard.avatar().character.combat.health.hit_points / HEALTH_SCALE)
+        .ceil()
+        .max(0.) as i32;
+    vm.set_prop(pawn, "Health", Value::Int(health));
+    state.published_health = Some(health);
+    if wizard.avatar().dead() && !state.death_delivered {
+        state.death_delivered = true;
+        let killer = last_hit
+            .as_ref()
+            .and_then(|h| h.instigator)
+            .and_then(|a| vm.get_prop(a, "Controller").and_then(Value::as_obj));
+        let damage_type = last_hit
+            .as_ref()
+            .and_then(|h| h.damage_type)
+            .or_else(|| vm.find_class("Engine", "DamageType").ok());
+        vm.fire_event(
+            pawn,
+            "Died",
+            vec![
+                Value::Object(killer),
+                Value::Class(damage_type),
+                Value::Vector(last_hit.as_ref().map(|h| h.location).unwrap_or(position)),
+            ],
+        );
+        println!("MAGICKA: wizard death delivered to Postal pawn");
+    }
     // Robe speed, queue slowdown and Haste drive first-person walking too.
     let speed = if state.classic {
         0.
@@ -376,7 +474,7 @@ fn tick(
         let Some(npc) = wizard.world.npcs.get(&mirror.handle) else {
             continue;
         };
-        let new_health = npc.character.combat.health.hit_points / 10.;
+        let new_health = npc.character.combat.health.hit_points / HEALTH_SCALE;
         let damage = mirror.health - new_health + mirror.remainder;
         if damage >= 1. {
             let amount = damage.floor() as i32;
@@ -405,7 +503,7 @@ fn tick(
         // The native TakeDamage may apply armour or script immunity. Keep
         // subsequent damage deltas relative to that actual result.
         if let Some(npc) = wizard.world.npcs.get_mut(&mirror.handle) {
-            npc.character.combat.health.hit_points = mirror.health * 10.;
+            npc.character.combat.health.hit_points = mirror.health * HEALTH_SCALE;
         }
     }
     let health = &wizard.avatar().character.combat.health;
@@ -600,4 +698,35 @@ fn visuals(
             mesh.compute_smooth_normals();
         }
     }
+}
+
+/// Postal damage classes retain their names/ancestry at runtime. Most attacks
+/// are physical; elemental classes are translated into the matching Magicka
+/// damage channel so the original robe/equipment tables and wards apply.
+fn postal_damage_element(
+    vm: &uscript::vm::Vm,
+    damage_type: Option<uscript::vm::ClassId>,
+) -> p2magicka::magicka_sim::spells::Elements {
+    use p2magicka::magicka_sim::spells::Elements as E;
+    let mut class = damage_type;
+    while let Some(id) = class {
+        let Some(info) = vm.classes.get(id) else {
+            break;
+        };
+        let name = info.name.to_ascii_lowercase();
+        if name.contains("fire") || name.contains("burn") || name.contains("napalm") {
+            return E::FIRE;
+        }
+        if name.contains("electric") || name.contains("shock") || name.contains("lightning") {
+            return E::LIGHTNING;
+        }
+        if name.contains("poison") || name.contains("anthrax") || name.contains("chemical") {
+            return E::POISON;
+        }
+        if name.starts_with("ice") || name.contains("freeze") || name.contains("frost") {
+            return E::COLD;
+        }
+        class = info.super_;
+    }
+    E::EARTH
 }

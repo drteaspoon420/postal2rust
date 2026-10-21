@@ -183,6 +183,24 @@ impl WizardWorld {
         }
         Ok(handle)
     }
+    /// Deliver host damage through the player's equipment, resistances,
+    /// shields and status processing, exactly like another Magicka entity.
+    pub fn receive_damage(
+        &mut self,
+        damage: magicka_sim::damage::Damage,
+        attacker: Option<u16>,
+        position: [f32; 3],
+    ) -> u16 {
+        let world = &mut self.world;
+        let avatar = world.players[0].as_mut().unwrap();
+        avatar.receive_payload(
+            &mut world.physics.bodies[avatar.body],
+            magicka_sim::damage_delivery::DamagePayload::Single(damage),
+            attacker,
+            position,
+            world.play_time,
+        )
+    }
     pub fn step(&mut self, dt: f32) -> Result<Vec<AvatarEvent>, String> {
         let dt = dt.clamp(0., 0.05) * self.world.time_multiplier * self.world.time_modifier;
         self.world.audio_requests.clear();

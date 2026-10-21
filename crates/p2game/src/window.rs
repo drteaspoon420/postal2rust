@@ -15,7 +15,7 @@ use bevy::image::{CompressedImageFormatSupport, CompressedImageFormats};
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::math::{Affine3A, Mat3, Vec3};
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::render::view::screenshot::save_to_disk;
 use p2game::boot::Game;
 use p2game::config::BootConfig;
 use p2game::level::World as P2World;
@@ -222,10 +222,13 @@ pub fn run(cfg: BootConfig, args: Args) {
 
     let mut app = App::new();
     let t_plugins = std::time::Instant::now();
+    let offscreen = a.iter().any(|a| a == "--offscreen");
+    let initial_window = crate::settings::initial_window(&mut sim.game.world.vm, "Postal 2 Rust/Bevy".to_string());
     let mut plugins = DefaultPlugins.set(WindowPlugin {
         // Size, window mode and vsync from the saved video settings (settings.rs; env overrides
         // P2GAME_RES=WxH, P2GAME_FULLSCREEN=1, P2GAME_NOVSYNC=1, P2GAME_FPS_LIMIT=N).
-        primary_window: Some(crate::settings::initial_window(&mut sim.game.world.vm, "Postal 2 Rust/Bevy".to_string())),
+        primary_window: (!offscreen).then_some(initial_window.clone()),
+        exit_condition: if offscreen { bevy::window::ExitCondition::DontExit } else { bevy::window::ExitCondition::OnAllClosed },
         ..default()
     });
     if std::env::var_os("P2GAME_SAMPLE").is_some() {
@@ -243,7 +246,9 @@ pub fn run(cfg: BootConfig, args: Args) {
         let wgpu = bevy::render::settings::WgpuSettings { disabled_features: Some(bevy::render::settings::WgpuFeatures::TEXTURE_BINDING_ARRAY), ..default() };
         plugins = plugins.set(bevy::render::RenderPlugin { render_creation: wgpu.into(), ..default() });
     }
+    if offscreen { plugins = plugins.disable::<bevy::winit::WinitPlugin>(); }
     app.add_plugins(plugins);
+    if offscreen { app.add_plugins(crate::offscreen::OffscreenPlugin { window: initial_window }); }
     crate::settings::install(&mut sim);
     app.add_plugins(crate::settings::SettingsPlugin);
     app.add_plugins(crate::window_memory::WindowMemoryPlugin);
@@ -1210,7 +1215,7 @@ fn capture(mut commands: Commands, args: Res<WinArgs>, mut fr: ResMut<Frames>, m
         return;
     }
     if fr.n == WARMUP {
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path.clone()));
+        commands.spawn(crate::offscreen::screenshot()).observe(save_to_disk(path.clone()));
     }
     if fr.n > WARMUP + 15 && (path.exists() || fr.n > WARMUP + 600) {
         println!("screenshot {} ({})", path.display(), args.map);

@@ -208,7 +208,7 @@ fn pilot(
         if let Some(dir) = std::path::Path::new(&path).parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        commands.spawn(bevy::render::view::screenshot::Screenshot::primary_window()).observe(bevy::render::view::screenshot::save_to_disk(std::path::PathBuf::from(path)));
+        commands.spawn(crate::offscreen::screenshot()).observe(bevy::render::view::screenshot::save_to_disk(std::path::PathBuf::from(path)));
     }
     if std::env::var_os("P2GAME_REAL").is_none() {
         keys.drain().for_each(drop);

@@ -23,6 +23,7 @@ thread_local! {
 
 /// Installs the call watches for this VM (idempotent) and forgets the previous level's hits.
 pub fn install(vm: &mut Vm) {
+    crate::damage_bridge::reset();
     HITS.with(|h| h.borrow_mut().clear());
     vm.watch_calls("TakeDamage", take_damage);
     vm.watch_calls("GiveMomentum", give_momentum);
@@ -39,6 +40,7 @@ fn take_damage(vm: &mut Vm, me: Option<ObjId>, a: &mut [Value], after: bool) {
     // TakeDamage(Damage, InstigatedBy, HitLocation, Momentum, DamageType), recorded on entry
     // (script rescales Momentum by Mass inside).
     let (Some(me), false) = (me, after) else { return };
+    if crate::damage_bridge::intercept(me, a) { return; }
     let (Some(hit), Some(mom)) = (vec_arg(a, 2), vec_arg(a, 3)) else { return };
     if mom.length_squared() < 1e-6 || !vm.class_is_a(vm.objects[me].class, "Pawn") && !vm.class_is_a(vm.objects[me].class, "Head") {
         return;

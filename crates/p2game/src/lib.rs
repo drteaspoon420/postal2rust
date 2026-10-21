@@ -16,6 +16,7 @@ pub mod demo;
 #[cfg(feature = "window")]
 pub mod fx_glue;
 pub mod gibs;
+pub mod damage_bridge;
 pub mod host;
 pub mod ini;
 pub mod level;

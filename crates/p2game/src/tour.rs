@@ -6,7 +6,7 @@
 
 use crate::window::Sim;
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::render::view::screenshot::save_to_disk;
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -120,7 +120,7 @@ fn step(mut tour: ResMut<Tour>, mut sim: NonSendMut<Sim>, time: Res<Time>, mut c
     }
     if t.shot_frame == Some(t.frames) && t.next > 0 {
         let path = t.dir.join(format!("{map}.png"));
-        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+        commands.spawn(crate::offscreen::screenshot()).observe(save_to_disk(path));
     }
     // Write the row and move on a few frames after the shot (or straight away for the boot map).
     let done = t.shot_frame.is_some_and(|s| t.frames >= s + 5) || t.next == 0;

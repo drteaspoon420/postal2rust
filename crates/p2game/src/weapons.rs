@@ -142,7 +142,7 @@ fn exec_hook(mut sim: NonSendMut<Sim>, mut frame: Local<u32>, mut last: Local<St
                     let vm = &sim.game.world.vm;
                     let t = vm.level.and_then(|l| vm.get_prop(l, "TimeSeconds")).map(|t| t.as_float()).unwrap_or(0.0);
                     println!("SHOT {path} at frame {f} t={t:.2}");
-                    commands.spawn(bevy::render::view::screenshot::Screenshot::primary_window()).observe(bevy::render::view::screenshot::save_to_disk(std::path::PathBuf::from(path.trim())));
+                    commands.spawn(crate::offscreen::screenshot()).observe(bevy::render::view::screenshot::save_to_disk(std::path::PathBuf::from(path.trim())));
                 }
             }
         }

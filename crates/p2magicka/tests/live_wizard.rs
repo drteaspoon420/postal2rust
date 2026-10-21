@@ -123,3 +123,44 @@ fn arcane_beam_hits_a_hosted_postal_pawn() {
         "real Magicka beam must damage the mirrored Postal character"
     );
 }
+
+#[test]
+fn incoming_host_damage_uses_magicka_health_and_self_shield() {
+    use p2magicka::magicka_sim::damage::{Damage, attack};
+    let mut w = world();
+    let physical = Damage {
+        attack: attack::DAMAGE,
+        element: Elements::EARTH.0,
+        amount: 100.,
+        magnitude: 1.,
+    };
+    let before = w.avatar().character.combat.health.hit_points;
+    w.receive_damage(physical, None, [3., 1., 0.]);
+    assert!(
+        w.avatar().character.combat.health.hit_points < before,
+        "incoming gunshot must reach the wizard's health"
+    );
+    element(&mut w, 2); // Shield
+    frames(
+        &mut w,
+        PlayerInput {
+            cast_self_down: true,
+            ..Default::default()
+        },
+        45,
+    );
+    frames(&mut w, PlayerInput::default(), 30);
+    let health = w.avatar().character.combat.health.hit_points;
+    let shield = w.avatar().character.combat.health.shield.health;
+    assert!(shield > 0., "the real self cast must create the ward");
+    w.receive_damage(physical, None, [3., 1., 0.]);
+    assert_eq!(
+        w.avatar().character.combat.health.hit_points,
+        health,
+        "the ward must intercept physical damage before health"
+    );
+    assert!(
+        w.avatar().character.combat.health.shield.health < shield,
+        "incoming host damage must wear down the ward"
+    );
+}

@@ -154,7 +154,7 @@ pub(crate) fn ui_frame(
             let path = out_dir.join(format!("stage_{name}.png"));
             std::fs::create_dir_all(&out_dir).ok();
             println!("smoke: screenshot {}", path.display());
-            commands.spawn(bevy::render::view::screenshot::Screenshot::primary_window()).observe(bevy::render::view::screenshot::save_to_disk(path));
+            commands.spawn(crate::offscreen::screenshot()).observe(bevy::render::view::screenshot::save_to_disk(path));
         }
         *n = n.wrapping_sub(1);
     }
