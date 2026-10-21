@@ -7,19 +7,14 @@ use magicka_content::level::{LevelModel, NavMesh, TriMesh};
 pub use magicka_runtime;
 pub use magicka_runtime::avatar::{AvatarEvent, PlayerInput};
 use magicka_runtime::{
-    CharacterDefinition,
-    animation_controller::AnimationSet,
     avatar::{InputFrame, PlayerAvatar},
-    play_content::{self, FsSceneContent},
-    scene_loading::custom_hash,
+    play_content::FsSceneContent,
+    play_session::{PlaySession, SessionEvent},
     scene_world::SceneWorld,
 };
 pub use magicka_sim;
 use magicka_sim::character_physics::{CharacterBody, Orientation};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 /// Host convention: 52.5 Unreal units per metre (Postal renderer convention). Axis exchange reverses
 /// handedness, so collision triangle winding must also be reversed.
@@ -83,34 +78,83 @@ impl Default for Loadout {
 }
 
 pub struct WizardWorld {
-    pub world: SceneWorld<FsSceneContent>,
+    /// A script-less Magicka play session on Postal collision: the same
+    /// spells, effects, beams and audio requests as a campaign scene.
+    pub session: PlaySession,
     pub content: PathBuf,
     pub loadout: Loadout,
 }
 impl WizardWorld {
-    pub fn new(content: &Path, level: LevelModel, loadout: Loadout) -> Result<Self, String> {
-        let mut world = SceneWorld::new(
-            Arc::new(level),
-            FsSceneContent::new(content),
-            0x50324d414749434b,
-        )?;
-        let (body, avatar) = prepare_wizard(content, &loadout)?;
-        world.add_player(0, body, avatar);
-        world.unlocked_magick_mask = magicka_sim::spells::ALL_MAGICKS_MASK;
+    pub fn new(
+        content: &Path,
+        level: LevelModel,
+        loadout: Loadout,
+        postal_spawn: [f32; 3],
+        postal_facing: [f32; 3],
+    ) -> Result<Self, String> {
+        // Magicka scenes default to a kill plane at -50 m; Postal maps can lie
+        // far below Magicka's origin, so the plane sits under the lowest surface.
+        let floor = level.collision_layers[0]
+            .vertices
+            .iter()
+            .map(|v| v[1])
+            .fold(0f32, f32::min);
+        let facing = [postal_facing[0], postal_facing[2], postal_facing[1]];
+        let mut session = PlaySession::hosted(
+            content,
+            level,
+            &loadout.robe,
+            to_magicka(postal_spawn),
+            facing,
+            floor - 50.,
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        if loadout.staff.is_some() || loadout.weapon.is_some() {
+            let defaults = session
+                .avatar()
+                .items
+                .iter()
+                .map(|(slot, item)| (*slot, item.definition.name.clone()))
+                .collect::<Vec<_>>();
+            let pick = |slot: i32, chosen: &Option<String>| {
+                chosen.clone().or_else(|| {
+                    defaults
+                        .iter()
+                        .find(|(s, _)| *s == slot)
+                        .map(|(_, n)| n.clone())
+                })
+            };
+            let (staff, weapon) = (pick(1, &loadout.staff), pick(0, &loadout.weapon));
+            session
+                .set_player_loadout(
+                    0,
+                    &loadout.robe,
+                    staff.as_deref().unwrap_or("staff_basic"),
+                    weapon.as_deref().unwrap_or("weapon_blunt_blade"),
+                )
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        session.world.unlocked_magick_mask = magicka_sim::spells::ALL_MAGICKS_MASK;
+        for slot in &mut session.unlocked_magicks {
+            *slot = magicka_sim::spells::ALL_MAGICKS_MASK;
+        }
         Ok(Self {
-            world,
+            session,
             content: content.into(),
             loadout,
         })
     }
+    pub fn world(&self) -> &SceneWorld<FsSceneContent> {
+        &self.session.world
+    }
     pub fn avatar(&self) -> &PlayerAvatar {
-        self.world.players[0].as_ref().unwrap()
+        self.session.world.players[0].as_ref().unwrap()
     }
     pub fn avatar_mut(&mut self) -> &mut PlayerAvatar {
-        self.world.players[0].as_mut().unwrap()
+        self.session.world.players[0].as_mut().unwrap()
     }
     pub fn body(&self) -> &CharacterBody {
-        &self.world.physics.bodies[self.avatar().body]
+        &self.session.world.physics.bodies[self.avatar().body]
     }
     /// Postal owns ordinary first-person walking. The Magicka body receives
     /// that pose before stepping; teleports and spell impulses remain visible
@@ -119,12 +163,13 @@ impl WizardWorld {
         let index = self.avatar().body;
         let f = [postal_facing[0], postal_facing[2], postal_facing[1]];
         let orientation = Orientation::from_forward_up(f, [0., 1., 0.]);
-        let body = &mut self.world.physics.bodies[index];
+        let body = &mut self.session.world.physics.bodies[index];
         body.move_to(to_magicka(postal_position), orientation);
         body.set_desired_direction(f);
     }
     pub fn input(&mut self, input: PlayerInput, aim: [f32; 3], dt: f32) {
-        let world = &mut self.world;
+        let world = &mut self.session.world;
+        let magicks_allowed = world.unlocked_magick_mask;
         let avatar = world.players[0].as_mut().unwrap();
         avatar.handle_input(
             &mut world.physics.bodies[avatar.body],
@@ -133,7 +178,7 @@ impl WizardWorld {
                 pick: Some(to_magicka(aim)),
                 dt,
                 play_time: world.play_time,
-                magicks_allowed: world.unlocked_magick_mask,
+                magicks_allowed,
                 ..Default::default()
             },
         );
@@ -149,6 +194,7 @@ impl WizardWorld {
     ) -> Result<u16, String> {
         use magicka_runtime::spawn_action::SpawnOrder;
         let handle = self
+            .session
             .world
             .summon_npc(
                 None,
@@ -167,15 +213,16 @@ impl WizardWorld {
                 },
             )
             .ok_or("could not host Postal pawn")?;
-        let npc = self.world.npcs.get_mut(&handle).unwrap();
+        let world = &mut self.session.world;
+        let npc = world.npcs.get_mut(&handle).unwrap();
         npc.weapons.clear();
         npc.character.definition.faction = 2;
         npc.character.combat.health.hit_points = health;
         npc.character.combat.health.max_hit_points = health;
-        let body = &mut self.world.physics.bodies[npc.body];
+        let body = &mut world.physics.bodies[npc.body];
         body.radius = radius / UNREAL_UNITS_PER_METRE;
         body.length = ((half_height - radius) * 2. / UNREAL_UNITS_PER_METRE).max(0.);
-        if let Some(e) = self.world.entities.iter_mut().find(|e| e.handle == handle) {
+        if let Some(e) = world.entities.iter_mut().find(|e| e.handle == handle) {
             e.faction = 2;
             e.original_faction = 2;
             e.hit_points = health;
@@ -191,7 +238,7 @@ impl WizardWorld {
         attacker: Option<u16>,
         position: [f32; 3],
     ) -> u16 {
-        let world = &mut self.world;
+        let world = &mut self.session.world;
         let avatar = world.players[0].as_mut().unwrap();
         avatar.receive_payload(
             &mut world.physics.bodies[avatar.body],
@@ -201,78 +248,25 @@ impl WizardWorld {
             world.play_time,
         )
     }
+    /// PlaySession.Step (world, effects, beams, bolts and audio requests).
+    /// Returns this step's avatar events.
     pub fn step(&mut self, dt: f32) -> Result<Vec<AvatarEvent>, String> {
-        let dt = dt.clamp(0., 0.05) * self.world.time_multiplier * self.world.time_modifier;
-        self.world.audio_requests.clear();
-        self.world.effect_commands.clear();
-        self.world
-            .step_live(None, dt)
-            .map_err(|e| format!("{e:?}"))?;
-        Ok(std::mem::take(&mut self.avatar_mut().events))
-    }
-}
-
-type PlayerFactory = Box<dyn FnOnce(u16, usize) -> PlayerAvatar>;
-fn prepare_wizard(
-    content: &Path,
-    loadout: &Loadout,
-) -> Result<(CharacterBody, PlayerFactory), String> {
-    let mut template =
-        play_content::load_character(content, &loadout.robe).map_err(|e| format!("{e:?}"))?;
-    for (slot, name) in [(0, &loadout.weapon), (1, &loadout.staff)] {
-        if let Some(name) = name {
-            let attachment = template
-                .equipment
-                .iter_mut()
-                .find(|(s, _)| *s == slot)
-                .ok_or_else(|| format!("{} has no equipment slot {slot}", loadout.robe))?;
-            attachment.1.item = Some(format!("../items/Wizard/{name}"));
+        self.session.audio.clear();
+        self.session.events.clear();
+        self.session.step(dt.clamp(0., 0.05));
+        if let Some(error) = &self.session.script_error {
+            return Err(error.clone());
         }
+        Ok(self
+            .session
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Avatar(a) => Some(a.clone()),
+                _ => None,
+            })
+            .collect())
     }
-    let definition =
-        CharacterDefinition::from_content(&template, 1).map_err(|e| format!("{e:?}"))?;
-    let rig = play_content::load_rig(content, &template).map_err(|e| format!("{e:?}"))?;
-    let animations = Arc::new(AnimationSet::with_weapons(
-        &template.animation_sets,
-        &play_content::weapon_classes(rig.as_ref()),
-        rig.as_ref()
-            .map(|r| r.skeleton.clip_durations())
-            .unwrap_or_default(),
-    ));
-    let abilities = play_content::move_abilities(&template);
-    let items = play_content::avatar_items(content, &template);
-    if ![0, 1]
-        .iter()
-        .all(|s| items.iter().any(|(slot, _)| slot == s))
-    {
-        return Err("could not load the wizard's staff and melee weapon".into());
-    }
-    let template_type = custom_hash(&template.id.to_ascii_lowercase());
-    let mut body = CharacterBody::new(
-        definition.radius,
-        definition.length,
-        definition.mass,
-        definition.speed,
-    );
-    body.owner.turn_speed = definition.turn_speed;
-    body.owner.hit_points = definition.max_hit_points;
-    Ok((
-        body,
-        Box::new(move |handle, index| {
-            let mut avatar = PlayerAvatar::new(
-                handle,
-                0,
-                index,
-                definition,
-                animations,
-                abilities,
-                template_type,
-            );
-            avatar.rig = rig;
-            avatar.items = items;
-            avatar
-        }),
-    ))
 }
 
 #[cfg(test)]

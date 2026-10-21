@@ -62,6 +62,7 @@ mod splash;
 mod weapons;
 #[cfg(feature = "window")]
 mod magicka;
+mod magicka_fx;
 #[cfg(feature = "window")]
 mod offscreen;
 #[cfg(feature = "window")]

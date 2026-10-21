@@ -20,6 +20,7 @@ impl Plugin for MagickaPlugin {
             classic: option("--magicka-camera").is_some_and(|c| c.eq_ignore_ascii_case("classic")),
             ..default()
         })
+        .add_plugins(crate::magicka_fx::MagickaFxPlugin)
         .add_systems(Startup, hud_setup)
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
@@ -63,7 +64,7 @@ struct Mirror {
     remainder: f32,
 }
 #[derive(Component)]
-struct MagicHud;
+pub(crate) struct MagicHud;
 fn hud_setup(mut commands: Commands) {
     commands.spawn((
         MagicHud,
@@ -116,7 +117,7 @@ pub(crate) fn filter_events(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tick(
+pub(crate) fn tick(
     mut state: NonSendMut<MagicState>,
     mut sim: NonSendMut<Sim>,
     ui: Res<UiInput>,
@@ -156,7 +157,21 @@ fn tick(
                 staff: option("--staff"),
                 weapon: option("--melee"),
             };
-            match WizardWorld::new(&content_dir(), p2magicka::postal_level(tris), loadout) {
+            let vm = &sim.game.world.vm;
+            let position = vm.actor_loc(pawn);
+            let yaw = vm
+                .get_prop(pc, "Rotation")
+                .map(Value::as_rot)
+                .unwrap_or_default()[1] as f32
+                * std::f32::consts::TAU
+                / 65536.;
+            match WizardWorld::new(
+                &content_dir(),
+                p2magicka::postal_level(tris),
+                loadout,
+                position,
+                [yaw.cos(), yaw.sin(), 0.],
+            ) {
                 Ok(world) => {
                     println!(
                         "MAGICKA: hosted wizard and Postal collision for {}",
@@ -243,7 +258,7 @@ fn tick(
         .map(Value::as_float)
         .unwrap_or(40.);
     let mage_half = -wizard.body().height_offset() * p2magicka::UNREAL_UNITS_PER_METRE;
-    wizard.world.physics.bodies[body_index].position[1] +=
+    wizard.session.world.physics.bodies[body_index].position[1] +=
         (mage_half - postal_half) / p2magicka::UNREAL_UNITS_PER_METRE;
     let body_before = wizard.body().position;
     // Native weapon selection and firing are suppressed while the wizard owns combat.
@@ -290,9 +305,9 @@ fn tick(
                 }
             }
             let mirror = &mut state.mirrors.get_mut(&actor).unwrap();
-            if let Some(npc) = wizard.world.npcs.get_mut(&mirror.handle) {
+            if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
                 npc.character.combat.health.hit_points += (hp - mirror.health) * HEALTH_SCALE;
-                let body = &mut wizard.world.physics.bodies[npc.body];
+                let body = &mut wizard.session.world.physics.bodies[npc.body];
                 body.move_to(p2magicka::to_magicka(pos), body.orientation);
                 body.velocity = [0.; 3];
             }
@@ -419,6 +434,15 @@ fn tick(
             return;
         }
     }
+    if std::env::var_os("MAGICKA_TRACE").is_some() {
+        println!(
+            "MAGICKA TRACE native={native_health} published={:?} hp={} pos={:?} body={:?}",
+            state.published_health,
+            wizard.avatar().character.combat.health.hit_points,
+            position,
+            wizard.body().position
+        );
+    }
     let health = (wizard.avatar().character.combat.health.hit_points / HEALTH_SCALE)
         .ceil()
         .max(0.) as i32;
@@ -471,7 +495,7 @@ fn tick(
         if vm.objects.get(actor).is_none_or(|o| o.deleted) {
             continue;
         }
-        let Some(npc) = wizard.world.npcs.get(&mirror.handle) else {
+        let Some(npc) = wizard.session.world.npcs.get(&mirror.handle) else {
             continue;
         };
         let new_health = npc.character.combat.health.hit_points / HEALTH_SCALE;
@@ -502,7 +526,7 @@ fn tick(
             .unwrap_or(0.);
         // The native TakeDamage may apply armour or script immunity. Keep
         // subsequent damage deltas relative to that actual result.
-        if let Some(npc) = wizard.world.npcs.get_mut(&mirror.handle) {
+        if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
             npc.character.combat.health.hit_points = mirror.health * HEALTH_SCALE;
         }
     }

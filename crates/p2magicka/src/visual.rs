@@ -239,3 +239,73 @@ pub fn positions(part: &Part, skin: &[Mat], items: &[(i32, Mat)]) -> Vec<[f32; 3
         _ => part.geometry.positions.clone(),
     }
 }
+
+fn asset(content: &Path, name: &str) -> Result<Asset, String> {
+    let Content::Xna(object) = read(content, name)?.content else {
+        return Err(format!("{name}: expected an XNA object"));
+    };
+    let XnaObject::Asset(asset) = *object else {
+        return Err(format!("{name}: expected an asset"));
+    };
+    Ok(*asset)
+}
+/// A Texture2D from Content (e.g. `EffectTextures/Beams`), base level only.
+pub fn texture2d(content: &Path, name: &str) -> Result<Texture, String> {
+    let Asset::Texture2D(t) = asset(content, name)? else {
+        return Err(format!("{name}: not a Texture2D"));
+    };
+    Ok(Texture {
+        width: t.width as u32,
+        height: t.height as u32,
+        rgba: magicka_content::texture::decode_rgba(
+            t.format,
+            t.width as usize,
+            t.height as usize,
+            t.mips.first().ok_or("no mips")?,
+        )
+        .ok_or_else(|| format!("{name}: undecodable format {}", t.format))?,
+    })
+}
+/// A particle sprite sheet volume: RGBA bytes of every mip level in order.
+pub struct Volume {
+    pub width: u32,
+    pub height: u32,
+    pub depth: u32,
+    pub mip_count: u32,
+    pub rgba: Vec<u8>,
+}
+/// EffectTextures/ParticlesA..D (Texture3D, SurfaceFormat.Color as BGRA).
+pub fn particle_sheets(content: &Path) -> Result<Vec<Volume>, String> {
+    ["A", "B", "C", "D"]
+        .iter()
+        .map(|k| {
+            let name = format!("EffectTextures/Particles{k}");
+            let Asset::Texture3D {
+                format,
+                width,
+                height,
+                depth,
+                mips,
+            } = asset(content, &name)?
+            else {
+                return Err(format!("{name}: not a Texture3D"));
+            };
+            if format != 1 {
+                return Err(format!("{name}: surface format {format}"));
+            }
+            let mut rgba = Vec::new();
+            for mip in &mips {
+                for c in mip.chunks_exact(4) {
+                    rgba.extend_from_slice(&[c[2], c[1], c[0], c[3]]);
+                }
+            }
+            Ok(Volume {
+                width: width as u32,
+                height: height as u32,
+                depth: depth as u32,
+                mip_count: mips.len() as u32,
+                rgba,
+            })
+        })
+        .collect()
+}

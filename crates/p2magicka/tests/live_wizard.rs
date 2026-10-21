@@ -8,6 +8,9 @@ use p2magicka::{
 };
 use std::path::PathBuf;
 const DT: f32 = 1. / 60.;
+/// Postal maps sit far below Magicka's default -50 m kill plane (suburbs-1
+/// is around Z -4300), so the test floor does too.
+const FLOOR: f32 = -4300.;
 fn world() -> WizardWorld {
     let content = std::env::var_os("MAGICKA_CONTENT")
         .map(PathBuf::from)
@@ -17,27 +20,34 @@ fn world() -> WizardWorld {
         });
     let floor = postal_level([
         [
-            [-2000., -2000., 0.],
-            [2000., -2000., 0.],
-            [2000., 2000., 0.],
+            [-2000., -2000., FLOOR],
+            [2000., -2000., FLOOR],
+            [2000., 2000., FLOOR],
         ],
         [
-            [-2000., -2000., 0.],
-            [2000., 2000., 0.],
-            [-2000., 2000., 0.],
+            [-2000., -2000., FLOOR],
+            [2000., 2000., FLOOR],
+            [-2000., 2000., FLOOR],
         ],
     ]);
-    let mut w = WizardWorld::new(&content, floor, Loadout::default())
-        .expect("load original Wizard and items");
-    w.place([0., 0., 60.], [1., 0., 0.]);
+    let mut w = WizardWorld::new(
+        &content,
+        floor,
+        Loadout::default(),
+        [0., 0., FLOOR + 60.],
+        [1., 0., 0.],
+    )
+    .expect("load original Wizard and items");
+    w.place([0., 0., FLOOR + 60.], [1., 0., 0.]);
     for _ in 0..90 {
         w.step(DT).unwrap();
     }
+    assert!(!w.avatar().dead(), "the wizard must survive standing on a deep Postal floor");
     w
 }
 fn frames(w: &mut WizardWorld, input: PlayerInput, n: usize) {
     for _ in 0..n {
-        w.input(input, [500., 0., 60.], DT);
+        w.input(input, [500., 0., FLOOR + 60.], DT);
         w.step(DT).unwrap();
     }
 }
@@ -95,20 +105,20 @@ fn self_life_cast_heals_and_haste_uses_rewrite_lifecycle() {
         "self cast life must heal"
     );
     let handle = w.avatar().handle;
-    w.world.cast_magick(0, MagickType::Haste);
-    assert!(w.world.ability_effects.hasted(handle));
+    w.session.world.cast_magick(0, MagickType::Haste);
+    assert!(w.session.world.ability_effects.hasted(handle));
     for _ in 0..700 {
         w.step(DT).unwrap();
     }
-    assert!(!w.world.ability_effects.hasted(handle), "haste must expire");
+    assert!(!w.session.world.ability_effects.hasted(handle), "haste must expire");
 }
 #[test]
 fn arcane_beam_hits_a_hosted_postal_pawn() {
     let mut w = world();
-    let handle = w.attach_pawn([200., 0., 60.], 1000., 24., 40.).unwrap();
+    let handle = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
     // Leave the hosted pawn standing on Postal's floor before casting.
     frames(&mut w, PlayerInput::default(), 30);
-    let before = w.world.npcs[&handle].character.combat.health.hit_points;
+    let before = w.session.world.npcs[&handle].character.combat.health.hit_points;
     element(&mut w, 5);
     frames(
         &mut w,
@@ -119,8 +129,29 @@ fn arcane_beam_hits_a_hosted_postal_pawn() {
         120,
     );
     assert!(
-        w.world.npcs[&handle].character.combat.health.hit_points < before,
+        w.session.world.npcs[&handle].character.combat.health.hit_points < before,
         "real Magicka beam must damage the mirrored Postal character"
+    );
+}
+#[test]
+fn spells_produce_original_beam_and_particle_presentation() {
+    let mut w = world();
+    element(&mut w, 5); // arcane
+    let cast = PlayerInput {
+        cast_down: true,
+        ..Default::default()
+    };
+    frames(&mut w, cast, 30);
+    assert!(
+        !w.session.beams.is_empty(),
+        "an arcane beam must yield railgun render data"
+    );
+    frames(&mut w, PlayerInput::default(), 60);
+    element(&mut w, 7); // fire spray
+    frames(&mut w, cast, 30);
+    assert!(
+        !w.session.effects.particles.active().is_empty(),
+        "a fire spray must emit original particle effects"
     );
 }
 
@@ -135,7 +166,7 @@ fn incoming_host_damage_uses_magicka_health_and_self_shield() {
         magnitude: 1.,
     };
     let before = w.avatar().character.combat.health.hit_points;
-    w.receive_damage(physical, None, [3., 1., 0.]);
+    w.receive_damage(physical, None, w.body().position);
     assert!(
         w.avatar().character.combat.health.hit_points < before,
         "incoming gunshot must reach the wizard's health"
@@ -153,7 +184,7 @@ fn incoming_host_damage_uses_magicka_health_and_self_shield() {
     let health = w.avatar().character.combat.health.hit_points;
     let shield = w.avatar().character.combat.health.shield.health;
     assert!(shield > 0., "the real self cast must create the ward");
-    w.receive_damage(physical, None, [3., 1., 0.]);
+    w.receive_damage(physical, None, w.body().position);
     assert_eq!(
         w.avatar().character.combat.health.hit_points,
         health,
@@ -163,4 +194,19 @@ fn incoming_host_damage_uses_magicka_health_and_self_shield() {
         w.avatar().character.combat.health.shield.health < shield,
         "incoming host damage must wear down the ward"
     );
+}
+#[test]
+fn particle_sprite_sheets_decode_with_content() {
+    let content = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../re-lab-starter/target/Magicka/Content");
+    let sheets = p2magicka::visual::particle_sheets(&content).unwrap();
+    assert_eq!(sheets.len(), 4);
+    for v in sheets {
+        let base = (v.width * v.height * v.depth * 4) as usize;
+        assert!(v.rgba.len() > base, "every sheet keeps its mip chain");
+        assert!(
+            v.rgba[..base].chunks_exact(4).any(|c| c[3] == 255),
+            "sprites have opaque texels"
+        );
+    }
 }
