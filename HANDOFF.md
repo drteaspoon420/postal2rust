@@ -1,5 +1,22 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Session 2026-10-22 (c): user playtest fixes
+
+- Classic movement: the body was teleported onto the pawn every frame and
+  never grounded, so Magicka would not walk it (F7 masked it). Classic now lets
+  Magicka own the body and moves the pawn with it; resync only on drift > 1.5 m.
+- Classic cutaway: `p2view/src/baked.wgsl` discards level surfaces above the
+  wizard's head near the camera-to-wizard line when the view matches the fixed
+  classic offset exactly (no camera collision any more in classic).
+- Earth/ice walls draw runesArcane/runesLife discs for arcane/life walls.
+- Saves: heads/hats/held items detached after load in the plain port too; the
+  host now periodically rebinds saved `Base`/`AttachmentBone` attachments.
+- First person: RMB casts (Shift+RMB area), LMB melee; staff in the left hand,
+  weapon in the right. MMB tap = self/staff special; hold MMB = element wheel
+  (locks view; flick past a sector to queue it, wheel re-centres).
+- Knockback: pushed mirror bodies (`is_pushed`) launch Postal pawns
+  (Velocity + PHYS_Falling) and keep momentum while pushed.
+
 ## Session 2026-10-22 (b): projectiles, walls, mines, shields, beams, HUD
 
 The Magicka workspace moved to `../rust-bevy-magicka` (new history; the old

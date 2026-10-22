@@ -846,13 +846,9 @@ pub(crate) fn camera(
     };
     let target = p2view::scene::to_bevy(vm.actor_loc(pawn));
     if let Ok(mut camera) = cameras.single_mut() {
-        let desired = target + Vec3::new(0., 600., 712.5) / p2view::scene::UU_PER_M;
-        let postal_start = Vec3::new(target.x, target.z, target.y) * p2view::scene::UU_PER_M;
-        let postal_end = Vec3::new(desired.x, desired.z, desired.y) * p2view::scene::UU_PER_M;
-        let position = p2game::physics::level_collision()
-            .and_then(|c| c.line(postal_start, postal_end))
-            .map(|h| p2view::scene::to_bevy(h.location.to_array()) + Vec3::Y * 0.4)
-            .unwrap_or(desired);
+        // Fixed offset: p2view's baked shader recognises this exact view to cut
+        // away roofs and walls between the camera and the wizard.
+        let position = target + Vec3::new(0., 600., 712.5) / p2view::scene::UU_PER_M;
         *camera = Transform::from_translation(position).looking_at(target, Vec3::Y);
     }
 }

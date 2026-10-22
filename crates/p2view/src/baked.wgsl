@@ -11,6 +11,7 @@
     forward_io::{VertexOutput, FragmentOutput},
     pbr_bindings,
     mesh_bindings::mesh,
+    mesh_view_bindings::view,
 }
 #import bevy_render::bindless::{bindless_samplers_filtering, bindless_textures_2d}
 
@@ -28,11 +29,34 @@ struct BakedLightIndices {
 @group(#{MATERIAL_BIND_GROUP}) @binding(51) var lightmap_sampler: sampler;
 #endif
 
+// Magicka classic camera cutaway (p2game magicka.rs `camera`): that camera sits at this fixed
+// offset (Postal 0,600,712.5 uu) from the wizard and looks exactly back at them, so the wizard's
+// position is recoverable here. Level surfaces above head height near the camera-to-wizard line
+// are cut away so roofs and walls do not hide the ground being clicked on. Any other camera
+// (first person, cinematics) never looks precisely along this direction.
+const CLASSIC_OFFSET = vec3<f32>(0.0, 11.428572, 13.571428);
+fn classic_cutaway(world: vec3<f32>) -> bool {
+    let forward = -normalize(view.world_from_view[2].xyz);
+    if dot(forward, -normalize(CLASSIC_OFFSET)) < 0.999999 {
+        return false;
+    }
+    let wizard = view.world_position - CLASSIC_OFFSET;
+    if world.y < wizard.y + 1.2 {
+        return false;
+    }
+    let seg = view.world_position - wizard;
+    let t = clamp(dot(world - wizard, seg) / dot(seg, seg), 0.0, 1.0);
+    return distance(world, wizard + seg * t) < 4.5;
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
 #ifdef BINDLESS
     let slot = mesh[in.instance_index].material_and_lightmap_bind_group_slot & 0xffffu;
 #endif
+    if classic_cutaway(in.world_position.xyz) {
+        discard;
+    }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
     var light = vec3<f32>(1.0);
 #ifdef VERTEX_COLORS
