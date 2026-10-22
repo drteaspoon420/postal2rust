@@ -737,6 +737,47 @@ pub(crate) fn tick(
     } else {
         0
     };
+    // A soaked wizard (self-cast water, rain, wading) puts out Postal fire on
+    // the player pawn too.
+    if wizard.avatar().character.combat.statuses.current_mask & p2magicka::magicka_sim::status::Status::Wet as u16 != 0 {
+        if let Some(fire) = vm.get_prop(pawn, "MyBodyFire").and_then(Value::as_obj) {
+            if vm.objects.get(fire).is_some_and(|o| !o.deleted) && vm.state_name(fire) != "Fading" {
+                let extinguish = vm.find_class("BaseFX", "ExtinguishDamage").ok();
+                vm.fire_event(fire, "TakeDamage", vec![
+                    Value::Int(1000),
+                    Value::Object(Some(pawn)),
+                    Value::Vector(position),
+                    Value::Vector([0.; 3]),
+                    Value::Class(extinguish),
+                ]);
+            }
+        }
+    }
+    // Debug: MAGICKA_DEBUG_DOUSE="a:b" sets bystanders within 10 m alight
+    // through Postal at tick a and wets their Magicka mirrors from tick b,
+    // exercising the fire/water bridge without chasing panicking NPCs.
+    if let Some((ignite, wet)) = std::env::var("MAGICKA_DEBUG_DOUSE")
+        .ok()
+        .and_then(|v| v.split_once(':').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))))
+    {
+        thread_local!(static TICK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+        let tick = TICK.with(|t| { t.set(t.get() + 1); t.get() });
+        for (&actor, mirror) in &state.mirrors {
+            if Vec3::from(vm.actor_loc(actor)).distance(Vec3::from(position)) > if tick < wet { 525. } else { 5000. } {
+                continue;
+            }
+            if tick == ignite {
+                vm.fire_event(actor, "SetOnFire", vec![Value::Object(Some(pawn)), Value::Bool(false)]);
+                let fire = vm.get_prop(actor, "MyBodyFire").and_then(Value::as_obj);
+                println!("MAGICKA DEBUG ignite {} fire={:?} state={:?} health={:?}", vm.object_name(actor), fire, fire.map(|f| vm.state_name(f)), fire.and_then(|f| vm.get_prop(f, "Health")));
+            }
+            if tick >= wet {
+                if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
+                    npc.character.combat.statuses.current_mask |= p2magicka::magicka_sim::status::Status::Wet as u16;
+                }
+            }
+        }
+    }
     for (&actor, mirror) in &mut state.mirrors {
         if vm.objects.get(actor).is_none_or(|o| o.deleted) {
             continue;
@@ -885,7 +926,7 @@ pub(crate) fn tick(
             if has(S::Wet) || quenched {
                 mirror.burning = false;
                 if let Some(fire) = vm.get_prop(actor, "MyBodyFire").and_then(Value::as_obj) {
-                    if vm.objects.get(fire).is_some_and(|o| !o.deleted) {
+                    if vm.objects.get(fire).is_some_and(|o| !o.deleted) && vm.state_name(fire) != "Fading" {
                         let extinguish = vm.find_class("BaseFX", "ExtinguishDamage").ok();
                         vm.fire_event(
                             fire,
@@ -900,7 +941,7 @@ pub(crate) fn tick(
                         );
                         mirror.burning = false;
                         if std::env::var_os("MAGICKA_TRACE").is_some() {
-                            println!("MAGICKA DOUSED {}", vm.object_name(actor));
+                            println!("MAGICKA DOUSED {} fire {} state {} health {:?}", vm.object_name(actor), vm.object_name(fire), vm.state_name(fire), vm.get_prop(fire, "Health"));
                         }
                     }
                 }

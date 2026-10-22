@@ -812,10 +812,13 @@ fn print_elemental_summon() {
     let elems = MAGICK_COMBOS.iter().find(|(m, _)| *m == MagickType::SElemental).unwrap().1;
     w.avatar_mut().conjure.queue = elems.iter().map(|e| Spell::default_for(*e)).collect();
     for i in 0..400 {
-        w.input(PlayerInput { boost_down: i < 2, ..Default::default() }, [500., 0., FLOOR + 60.], DT);
+        if i == 100 { element(&mut w, 7); }
+        let fire = i > 110 && i < 200;
+        w.input(PlayerInput { boost_down: i < 2, cast_down: fire, ..Default::default() }, [500., 0., FLOOR + 60.], DT);
         w.step(DT).unwrap();
         if i % 60 == 0 {
-            println!("{i}: npcs={} eggs={} log={:?}", w.session.world.npcs.len(), w.session.world.elemental_eggs.is_some(), w.session.world.log.iter().rev().take(3).collect::<Vec<_>>());
+            let eggs: Vec<_> = w.session.world.elemental_eggs.as_ref().map(|e| e.slots.iter().filter(|s| s.actor.registered).map(|s| s.actor.registered).collect()).unwrap_or_default();
+            println!("{i}: npcs={:?} eggs={eggs:?} me={:?} log={:?}", w.session.world.npcs.values().map(|n| n.handle).collect::<Vec<_>>(), w.body().position, w.session.world.log.iter().rev().take(3).collect::<Vec<_>>());
         }
     }
 }
