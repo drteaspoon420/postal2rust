@@ -8,6 +8,7 @@ use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
 mod hud;
 mod wardrobe;
+mod wheel;
 
 // Default Wizard has 1000 HP; Postal's default player has 100. This host
 // conversion keeps a gunshot's relative strength while retaining robe stats.
@@ -76,9 +77,12 @@ pub(crate) struct MagicState {
     wardrobe: wardrobe::Wardrobe,
     /// F8: full control help in the status panel.
     help: bool,
+    wheel: wheel::Wheel,
 }
 impl MagicState {
     pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
+    /// The first-person element wheel holds the view still.
+    pub(crate) fn wheel_open(&self) -> bool { self.wheel.open && !self.classic }
 }
 fn persistence_pending(mut sim: NonSendMut<Sim>) {
     sim.game.save_extension_errors.insert("magicka".into(), "Wizard is still loading".into());
@@ -136,6 +140,7 @@ pub(crate) fn filter_events(
     events: &mut Vec<p2input::bevy_map::InputEvent>,
     captured: bool,
     classic: bool,
+    wheel: bool,
 ) {
     if !enabled() || captured {
         return;
@@ -152,6 +157,7 @@ pub(crate) fn filter_events(
                     | Key::MOUSE_WHEEL_DOWN
             ) || (b'1'..=b'8').contains(&e.key.0)
                 || matches!(e.key.0, b'Q' | b'R')
+                || (wheel && matches!(e.key, Key::MOUSE_X | Key::MOUSE_Y))
                 || (classic
                     && (matches!(e.key, Key::MOUSE_X | Key::MOUSE_Y | Key::SPACE)
                         || b"QWERASDF".contains(&e.key.0))))
@@ -166,6 +172,7 @@ pub(crate) fn tick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     scroll: Res<AccumulatedMouseScroll>,
+    motion: Res<bevy::input::mouse::AccumulatedMouseMotion>,
     time: Res<Time>,
     windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<crate::window::FlyCam>>,
@@ -512,15 +519,24 @@ pub(crate) fn tick(
             KeyCode::Digit8,
         ]
     };
+    let screen = windows.single().map(|w| Vec2::new(w.width(), w.height())).unwrap_or(Vec2::new(1280., 720.));
+    let (wheel_keys, wheel_self) = if state.classic || state.wardrobe.open {
+        state.wheel = Default::default();
+        ([false; 8], false)
+    } else {
+        state.wheel.update(mouse.pressed(MouseButton::Middle), motion.delta, screen, dt)
+    };
     let mut input = PlayerInput {
         // First-person retains WASD; numbers are the same ordered eight
         // elements as classic Q W E R A S D F.
-        elements: element_keys.map(|k| keys.pressed(k)),
+        elements: std::array::from_fn(|i| keys.pressed(element_keys[i]) || wheel_keys[i]),
         move_down: state.classic && mouse.pressed(MouseButton::Left),
         // Both views cast with RMB like Magicka; first person swings the
         // weapon (right hand) with LMB.
         cast_down: mouse.pressed(MouseButton::Right),
-        cast_self_down: mouse.pressed(MouseButton::Middle),
+        // Classic holds MMB to self-cast; first person taps it (holding opens
+        // the element wheel).
+        cast_self_down: if state.classic { mouse.pressed(MouseButton::Middle) } else { wheel_self },
         shift_down: keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight),
         pad_movement: (!state.classic).then_some([0., 0.]),
         pad_attack: !state.classic && mouse.pressed(MouseButton::Left),
@@ -771,7 +787,7 @@ pub(crate) fn tick(
     } else if state.classic {
         "Q W E R / A S D F: Water Life Shield Cold / Lightning Arcane Earth Fire\nLMB move | Shift+LMB melee | RMB cast | Shift+RMB area | MMB self / staff | Space magick\nF6 camera | F7 loadout | F8 hide help"
     } else {
-        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move | RMB cast | Shift+RMB area | MMB self / staff | LMB melee | Q magick\nF6 camera | F7 loadout | F8 hide help"
+        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move | RMB cast | Shift+RMB area | LMB melee | Q magick\nMMB tap: self / staff | hold MMB + flick: element wheel\nF6 camera | F7 loadout | F8 hide help"
     };
     for mut text in &mut hud {
         **text = format!(

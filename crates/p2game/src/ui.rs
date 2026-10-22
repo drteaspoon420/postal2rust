@@ -80,7 +80,7 @@ pub(crate) fn ui_frame(
     let (w, h) = (win.physical_width().max(1) as i32, win.physical_height().max(1) as i32);
     let dt = time.delta_secs().clamp(0.0, 0.2);
     let mut events = p2input::bevy_map::collect_events(&keys, &mouse, motion.delta, scroll.delta.y, &[]);
-    crate::magicka::filter_events(&mut events, capture.captured, magic.as_ref().is_some_and(|s| s.classic));
+    crate::magicka::filter_events(&mut events, capture.captured, magic.as_ref().is_some_and(|s| s.classic), magic.as_ref().is_some_and(|s| s.wheel_open()));
     // The wizard loadout owns keyboard navigation. Release held native bindings
     // as well, so opening it while walking cannot leave Postal moving forever.
     let loadout_capture = !capture.captured && magic.as_ref().is_some_and(|s| {

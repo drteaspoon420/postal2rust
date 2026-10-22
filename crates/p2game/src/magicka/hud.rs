@@ -22,6 +22,10 @@ pub(super) struct QueueIcon(usize);
 pub(super) struct KeyLabel(usize);
 #[derive(Component)]
 pub(super) struct WizardHudRoot;
+#[derive(Component)]
+pub(super) struct WheelIcon(usize);
+#[derive(Component)]
+pub(super) struct WheelCursor;
 
 #[derive(Default)]
 pub(super) struct Atlas {
@@ -39,6 +43,14 @@ pub(super) fn icons(
     mut queue: Query<(&QueueIcon, &mut ImageNode, &mut Node), Without<KeyLabel>>,
     mut labels: Query<(&KeyLabel, &mut Text)>,
     mut roots: Query<&mut Visibility, With<WizardHudRoot>>,
+    mut wheel_icons: Query<
+        (&WheelIcon, &mut Node, &mut ImageNode, &mut Visibility),
+        (Without<QueueIcon>, Without<KeyLabel>, Without<WizardHudRoot>, Without<WheelCursor>),
+    >,
+    mut wheel_cursor: Query<
+        (&mut Node, &mut Visibility),
+        (With<WheelCursor>, Without<QueueIcon>, Without<WizardHudRoot>, Without<WheelIcon>),
+    >,
 ) {
     let Some(wizard) = &state.world else { return };
     if !atlas.loaded {
@@ -131,11 +143,61 @@ pub(super) fn icons(
                     });
                 }
             });
+        // Element wheel (first person, hold MMB): eight icons around the pointer.
+        for sector in 0..8 {
+            commands.spawn((
+                WheelIcon(sector),
+                ImageNode::new(image.clone()).with_rect(icon_rect(KEY_ELEMENTS[super::wheel::SECTORS[sector]])),
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: px(40.),
+                    height: px(40.),
+                    ..default()
+                },
+                Visibility::Hidden,
+                GlobalZIndex(i32::MAX - 2),
+            ));
+        }
+        commands.spawn((
+            WheelCursor,
+            Node {
+                position_type: PositionType::Absolute,
+                width: px(8.),
+                height: px(8.),
+                border_radius: BorderRadius::MAX,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(1., 0.9, 0.6, 0.9)),
+            Visibility::Hidden,
+            GlobalZIndex(i32::MAX - 1),
+        ));
         return;
     }
     let visible = ui.player_view && !state.wardrobe.open;
     for mut v in &mut roots {
         *v = if visible { Visibility::Visible } else { Visibility::Hidden };
+    }
+    let wheel = &state.wheel;
+    let open = visible && state.wheel_open();
+    for (icon, mut node, mut image, mut v) in &mut wheel_icons {
+        *v = if open { Visibility::Visible } else { Visibility::Hidden };
+        if !open {
+            continue;
+        }
+        let angle = icon.0 as f32 * std::f32::consts::TAU / 8.;
+        let at = wheel.center + Vec2::new(angle.sin(), -angle.cos()) * super::wheel::RADIUS;
+        let flash = wheel.flash.is_some_and(|(s, _)| s == icon.0);
+        let size = if flash { 52. } else { 40. };
+        node.left = px(at.x - size / 2.);
+        node.top = px(at.y - size / 2.);
+        node.width = px(size);
+        node.height = px(size);
+        image.color = Color::srgba(1., 1., 1., if flash { 1. } else { 0.8 });
+    }
+    for (mut node, mut v) in &mut wheel_cursor {
+        *v = if open { Visibility::Visible } else { Visibility::Hidden };
+        node.left = px(wheel.cursor.x - 4.);
+        node.top = px(wheel.cursor.y - 4.);
     }
     let elements = &wizard.avatar().conjure.queue;
     for (icon, mut image, mut node) in &mut queue {
