@@ -10,6 +10,7 @@ use bevy::render::render_resource::{AsBindGroup, Extent3d, TextureDimension, Tex
 use bevy::shader::ShaderRef;
 
 const BAKED_SHADER: Handle<Shader> = uuid_handle!("2c7d9a41-5b8e-4f13-a6d2-91e0c4b7f358");
+const BAKED_PREPASS_SHADER: Handle<Shader> = uuid_handle!("8e1f4c27-3a9d-4b62-b0e5-7d24a6c9f013");
 
 /// Scale applied to baked static mesh vertex colours before the gamma conversion
 /// (UE2 modulate-2x: colour 128 = full brightness).
@@ -23,6 +24,10 @@ impl Plugin for BakedPlugin {
             .resource_mut::<Assets<Shader>>()
             .insert(BAKED_SHADER.id(), Shader::from_wgsl(include_str!("baked.wgsl"), "p2view/baked.wgsl"))
             .expect("register baked lighting shader");
+        app.world_mut()
+            .resource_mut::<Assets<Shader>>()
+            .insert(BAKED_PREPASS_SHADER.id(), Shader::from_wgsl(include_str!("baked_prepass.wgsl"), "p2view/baked_prepass.wgsl"))
+            .expect("register baked prepass shader");
         app.add_plugins(MaterialPlugin::<BakedMaterial>::default());
     }
 }
@@ -43,6 +48,27 @@ pub struct BakedLight {
 impl MaterialExtension for BakedLight {
     fn fragment_shader() -> ShaderRef {
         ShaderRef::Handle(BAKED_SHADER)
+    }
+    fn prepass_fragment_shader() -> ShaderRef {
+        ShaderRef::Handle(BAKED_PREPASS_SHADER)
+    }
+    /// Depth-only opaque prepasses normally run without a fragment stage; give them the
+    /// cutaway-aware one so cut surfaces write no depth either.
+    fn specialize(
+        _: &bevy::pbr::MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _: bevy::pbr::MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        if descriptor.fragment.is_none() && descriptor.label.as_deref().is_some_and(|l| l.contains("prepass")) {
+            descriptor.fragment = Some(bevy::render::render_resource::FragmentState {
+                shader: BAKED_PREPASS_SHADER,
+                shader_defs: descriptor.vertex.shader_defs.clone(),
+                targets: vec![],
+                ..default()
+            });
+        }
+        Ok(())
     }
 }
 

@@ -217,17 +217,93 @@ impl Material for AdditiveMaterial {
     }
 }
 
+const DECAL_INV_X: MeshVertexAttribute =
+    MeshVertexAttribute::new("DecalInverseX", 0x6d64_0001, VertexFormat::Float32x4);
+const DECAL_INV_Y: MeshVertexAttribute =
+    MeshVertexAttribute::new("DecalInverseY", 0x6d64_0002, VertexFormat::Float32x4);
+const DECAL_INV_Z: MeshVertexAttribute =
+    MeshVertexAttribute::new("DecalInverseZ", 0x6d64_0003, VertexFormat::Float32x4);
+const DECAL_ARGS: MeshVertexAttribute =
+    MeshVertexAttribute::new("DecalArgs", 0x6d64_0004, VertexFormat::Float32x3);
+
+/// Magicka's projection effect (viewer `DecalMaterial`) over the decal atlas.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
+pub(crate) struct DecalMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    atlas: Handle<Image>,
+}
+impl Material for DecalMaterial {
+    fn vertex_shader() -> ShaderRef {
+        shader(embedded_path!("magicka_decals.wgsl"))
+    }
+    fn fragment_shader() -> ShaderRef {
+        shader(embedded_path!("magicka_decals.wgsl"))
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+    fn depth_bias(&self) -> f32 {
+        f32::NEG_INFINITY
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+    fn specialize(
+        _: &MaterialPipeline,
+        d: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        d.vertex.buffers = vec![layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            DECAL_INV_X.at_shader_location(1),
+            DECAL_INV_Y.at_shader_location(2),
+            DECAL_INV_Z.at_shader_location(3),
+            DECAL_ARGS.at_shader_location(4),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
+        ])?];
+        if let Some(depth) = &mut d.depth_stencil {
+            depth.depth_compare = Some(CompareFunction::GreaterEqual);
+            depth.depth_write_enabled = Some(false);
+        }
+        // Exit faces, so projection also works with the camera inside a box.
+        d.primitive.cull_mode = Some(bevy::render::render_resource::Face::Front);
+        Ok(())
+    }
+}
+
+/// Magicka's projections read scene depth: give the Postal camera a depth
+/// prepass while the wizard is hosted (the camera is respawned per level).
+fn depth_prepass(
+    mut commands: Commands,
+    cameras: Query<Entity, (With<crate::window::FlyCam>, Without<bevy::core_pipeline::prepass::DepthPrepass>)>,
+) {
+    if std::env::var_os("MAGICKA_NO_PREPASS").is_some() {
+        return;
+    }
+    for camera in &cameras {
+        commands.entity(camera).insert(bevy::core_pipeline::prepass::DepthPrepass);
+    }
+}
+
 pub(crate) struct MagickaFxPlugin;
 impl Plugin for MagickaFxPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "magicka_particles.wgsl");
         embedded_asset!(app, "magicka_beam.wgsl");
         embedded_asset!(app, "magicka_additive.wgsl");
+        embedded_asset!(app, "magicka_decals.wgsl");
         app.add_plugins((
             MaterialPlugin::<ParticleMaterial>::default(),
             MaterialPlugin::<BeamMaterial>::default(),
             MaterialPlugin::<AdditiveMaterial>::default(),
+            MaterialPlugin::<DecalMaterial>::default(),
         ))
+        .add_systems(Update, depth_prepass)
         .add_systems(
             Update,
             sync.after(crate::magicka::tick)
@@ -307,6 +383,8 @@ struct FxState {
     /// runesArcane / runesLife meshes and the runes00 texture (None: failed).
     rune_assets: Option<Option<([Handle<Mesh>; 2], Handle<Image>)>>,
     runes: Vec<(Entity, Handle<AdditiveMaterial>)>,
+    /// Ground projections: one mesh for all of them (None: atlas failed).
+    decals: Option<Option<(Entity, Handle<Mesh>)>>,
 }
 struct EffectModel {
     effect: p2magicka::visual::SkinnedEffect,
@@ -525,6 +603,7 @@ fn sync(
     mut beam_materials: ResMut<Assets<BeamMaterial>>,
     mut additive: ResMut<Assets<AdditiveMaterial>>,
     mut standard: ResMut<Assets<StandardMaterial>>,
+    mut decal_materials: ResMut<Assets<DecalMaterial>>,
     mut transforms: Query<(&mut Transform, &mut Visibility)>,
 ) {
     let fx = &mut *fx;
@@ -731,6 +810,7 @@ fn sync(
         &mut transforms,
     );
     barrier_runes(&mut commands, (&mut fx.rune_assets, &mut fx.runes), wizard, world, &mut images, &mut meshes, &mut additive, &mut transforms);
+    ground_decals(&mut commands, &mut fx.decals, wizard, world, &mut images, &mut meshes, &mut decal_materials, &mut transforms);
     // Earth and ice walls and spell mines: the original skinned models with
     // their emerge clips at the simulation's clip times (viewer sync_barriers
     // and sync_mines placement).
@@ -1439,5 +1519,98 @@ fn barrier_runes(
         if let Ok((_, mut v)) = transforms.get_mut(*entity) {
             *v = Visibility::Hidden;
         }
+    }
+}
+
+/// Magicka ground projections (spell scorch marks, shield/element runes,
+/// staff effects): the sim's decal frame projected onto scene depth with the
+/// original `EffectTextures/decals` atlas (viewer `decals.rs`).
+#[allow(clippy::too_many_arguments)]
+fn ground_decals(
+    commands: &mut Commands,
+    state: &mut Option<Option<(Entity, Handle<Mesh>)>>,
+    wizard: &p2magicka::WizardWorld,
+    world: &p2magicka::magicka_runtime::scene_world::SceneWorld<
+        p2magicka::magicka_runtime::play_content::FsSceneContent,
+    >,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    decal_materials: &mut Assets<DecalMaterial>,
+    transforms: &mut Query<(&mut Transform, &mut Visibility)>,
+) {
+    let list = &world.decals.frame;
+    if list.is_empty() && state.as_ref().is_none_or(|s| s.is_none()) {
+        return;
+    }
+    let (mut positions, mut ix, mut iy, mut iz, mut args, mut colors, mut indices) =
+        (vec![], vec![], vec![], vec![], vec![], vec![], vec![]);
+    for p in list.iter().filter(|p| p.args[2] > 0.0 && p.inverse.iter().all(|x| x.is_finite())) {
+        let base = positions.len() as u32;
+        let transform = Mat4::from_cols_array(&p.transform);
+        let column = |c: usize| [p.inverse[c], p.inverse[c + 4], p.inverse[c + 8], p.inverse[c + 12]];
+        for j in 0..8 {
+            let v = Vec3::new(
+                if j % 2 < 1 { -0.5 } else { 0.5 },
+                if j % 4 < 2 { -0.5 } else { 0.5 },
+                if j % 8 < 4 { -0.5 } else { 0.5 },
+            );
+            positions.push(transform.transform_point3(v).to_array());
+            ix.push(column(0));
+            iy.push(column(1));
+            iz.push(column(2));
+            args.push(p.args);
+            colors.push(p.color);
+        }
+        indices.extend(
+            [0, 2, 1, 1, 2, 3, 1, 0, 4, 4, 5, 1, 0, 2, 4, 4, 2, 6, 4, 6, 5, 5, 6, 7, 2, 3, 6, 6, 3, 7, 3, 1, 5, 5, 7, 3]
+                .map(|i| base + i),
+        );
+    }
+    if positions.is_empty() {
+        positions.push([0.0; 3]);
+        ix.push([0.0; 4]);
+        iy.push([0.0; 4]);
+        iz.push([0.0; 4]);
+        args.push([0.0; 3]);
+        colors.push([0.0; 4]);
+        indices.extend([0, 0, 0]);
+    }
+    let mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(DECAL_INV_X, ix)
+        .with_inserted_attribute(DECAL_INV_Y, iy)
+        .with_inserted_attribute(DECAL_INV_Z, iz)
+        .with_inserted_attribute(DECAL_ARGS, args)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices));
+    let entry = state.get_or_insert_with(|| {
+        let texture = match p2magicka::visual::texture2d(&wizard.content, "EffectTextures/decals") {
+            Ok(t) => t,
+            Err(error) => {
+                eprintln!("MAGICKA decals: {error}");
+                return None;
+            }
+        };
+        // Sampled raw and converted in the shader, as the viewer does.
+        let image = images.add(Image::new(
+            Extent3d { width: texture.width, height: texture.height, depth_or_array_layers: 1 },
+            TextureDimension::D2,
+            texture.rgba,
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::default(),
+        ));
+        let material = decal_materials.add(DecalMaterial { atlas: image });
+        let handle = meshes.add(Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default()));
+        let entity = commands
+            .spawn((Mesh3d(handle.clone()), MeshMaterial3d(material), Transform::IDENTITY, Visibility::Visible, NotShadowCaster, NoFrustumCulling))
+            .id();
+        Some((entity, handle))
+    });
+    let Some((entity, handle)) = entry.as_ref() else { return };
+    if let Some(mut m) = meshes.get_mut(handle) {
+        *m = mesh;
+    }
+    if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+        *v = if list.is_empty() { Visibility::Hidden } else { Visibility::Visible };
     }
 }
