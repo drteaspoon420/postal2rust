@@ -6,7 +6,7 @@ cd -- "$project_dir"
 mkdir -p out/magicka
 # First person: arcane beam, fire spray, lightning, charged earth rock and a
 # shield wall; then F6 to the classic camera and a cursor-aimed fire spray.
-export P2GAME_REAL='50:key 6;55:mdown left;85:mup left;95:key 8;100:key 8;105:mdown left;130:mup left;140:key 5;145:mdown left;165:mup left;175:key 7;180:key 7;185:mdown left;205:mup left;220:key 3;225:mdown left;229:mup left;242:mdown right;244:mup right;250:key F6;255:cursor 800,300;270:key F;275:mdown right;300:mup right;305:key E;306:key F;308:down ShiftLeft;309:mdown right;312:mup right;313:up ShiftLeft'
+export P2GAME_REAL='50:key 6;55:mdown right;85:mup right;95:key 8;100:key 8;105:mdown right;130:mup right;140:key 5;145:mdown right;165:mup right;175:key 7;180:key 7;185:mdown right;205:mup right;220:key 3;225:mdown right;229:mup right;242:mdown left;244:mup left;250:key F6;255:cursor 800,300;270:key F;275:mdown right;300:mup right;305:key E;306:key F;308:down ShiftLeft;309:mdown right;312:mup right;313:up ShiftLeft'
 export P2GAME_SHOTS='40:out/magicka/first-person.png;75:out/magicka/arcane-beam.png;120:out/magicka/fire-spray.png;155:out/magicka/lightning.png;210:out/magicka/earth-rock.png;238:out/magicka/shield-wall.png;247:out/magicka/melee.png;265:out/magicka/classic.png;290:out/magicka/classic-fire.png;325:out/magicka/classic-area.png'
 export P2GAME_EXIT=340
 export P2GAME_EXIT_SECS=180

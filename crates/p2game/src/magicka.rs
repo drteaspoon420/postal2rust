@@ -517,15 +517,13 @@ pub(crate) fn tick(
         // elements as classic Q W E R A S D F.
         elements: element_keys.map(|k| keys.pressed(k)),
         move_down: state.classic && mouse.pressed(MouseButton::Left),
-        cast_down: mouse.pressed(if state.classic {
-            MouseButton::Right
-        } else {
-            MouseButton::Left
-        }),
+        // Both views cast with RMB like Magicka; first person swings the
+        // weapon (right hand) with LMB.
+        cast_down: mouse.pressed(MouseButton::Right),
         cast_self_down: mouse.pressed(MouseButton::Middle),
         shift_down: keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight),
         pad_movement: (!state.classic).then_some([0., 0.]),
-        pad_attack: !state.classic && mouse.pressed(MouseButton::Right),
+        pad_attack: !state.classic && mouse.pressed(MouseButton::Left),
         boost_down: keys.pressed(if state.classic {
             KeyCode::Space
         } else {
@@ -566,7 +564,9 @@ pub(crate) fn tick(
                     spell, cast_type, ..
                 } = event
                 {
-                    state.notices = format!("{:?}: {}", cast_type, spell_name(&spell));
+                    if spell.element.0 != 0 {
+                        state.notices = format!("{:?}: {}", cast_type, spell_name(&spell));
+                    }
                     state.recent_elements = (spell.element.0, state.clock);
                     println!("MAGICKA CAST {:?} {:?}", cast_type, spell);
                 }
@@ -771,7 +771,7 @@ pub(crate) fn tick(
     } else if state.classic {
         "Q W E R / A S D F: Water Life Shield Cold / Lightning Arcane Earth Fire\nLMB move | Shift+LMB melee | RMB cast | Shift+RMB area | MMB self / staff | Space magick\nF6 camera | F7 loadout | F8 hide help"
     } else {
-        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move | LMB cast | Shift+LMB area | MMB self / staff | RMB melee | Q magick\nF6 camera | F7 loadout | F8 hide help"
+        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move | RMB cast | Shift+RMB area | MMB self / staff | LMB melee | Q magick\nF6 camera | F7 loadout | F8 hide help"
     };
     for mut text in &mut hud {
         **text = format!(
@@ -927,7 +927,7 @@ fn visuals(
         let aim = p2view::scene::to_bevy(state.aim.to_array());
         Some((eye, (aim - eye).normalize_or(Vec3::NEG_Z)))
     });
-    // First person: the staff (right hand) and melee weapon (left hand) are
+    // First person: the staff (left hand) and melee weapon (right hand) are
     // held in view instead of following the third-person animation, with the
     // cast thrust, charge tremble and melee swing driven by the avatar state.
     let motion_state = wizard.avatar().motion.state;
@@ -960,21 +960,21 @@ fn visuals(
         move |slot: i32| -> (Vec3, Vec3, Vec3, Vec3) {
             let (mut grip, mut axis, scale) = if slot == 1 {
                 (
-                    eye + forward * 0.62 + right * 0.3 - up * 0.42,
-                    (up * 0.85 + forward * 0.4 - right * 0.12).normalize(),
+                    eye + forward * 0.62 - right * 0.3 - up * 0.42,
+                    (up * 0.85 + forward * 0.4 + right * 0.12).normalize(),
                     0.42,
                 )
             } else {
                 (
-                    eye + forward * 0.5 - right * 0.34 - up * 0.42,
-                    (up * 0.55 + forward * 0.75 + right * 0.2).normalize(),
+                    eye + forward * 0.5 + right * 0.34 - up * 0.42,
+                    (up * 0.55 + forward * 0.75 - right * 0.2).normalize(),
                     0.55,
                 )
             };
             grip += bob;
             if slot == 1 && (cast || charge || boost) {
                 let k = ease(0.12);
-                grip += forward * 0.14 * k - right * 0.06 * k + up * 0.05 * k;
+                grip += forward * 0.14 * k + right * 0.06 * k + up * 0.05 * k;
                 axis = axis.lerp((forward * 0.75 + up * 0.65).normalize(), k).normalize();
                 if charge {
                     grip += (right * (t * 47.).sin() + up * (t * 39.).cos()) * 0.006;
@@ -990,7 +990,7 @@ fn visuals(
                 let swing = Quat::from_axis_angle(forward, angle)
                     * Quat::from_axis_angle(up, -0.6 * k);
                 axis = (swing * (up * 0.3 + forward * 0.9)).normalize();
-                grip += right * 0.3 * (k * std::f32::consts::PI).sin() + forward * 0.08;
+                grip -= right * 0.3 * (k * std::f32::consts::PI).sin() - forward * 0.08;
             }
             let z = (forward - axis * forward.dot(axis)).normalize_or(-right);
             let x = axis.cross(z);

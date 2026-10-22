@@ -129,7 +129,8 @@ block new saves rather than writing a silently reset wizard. The sidecar now
 records the original map identity when resaving a loaded game.
 
 The first-person element keys are 1..8 (Water, Life, Shield, Cold, Lightning,
-Arcane, Earth, Fire), preserving WASD movement. LMB casts, Shift+LMB casts area,
-MMB self-casts or uses the staff special with an empty queue, RMB attacks with
-the melee weapon, and Q boosts/casts a prepared magick. Classic mode uses the
+Arcane, Earth, Fire), preserving WASD movement. RMB casts, Shift+RMB casts area
+(as in classic), MMB self-casts or uses the staff special with an empty queue,
+LMB attacks with the melee weapon (right hand; the staff is in the left), and Q
+boosts/casts a prepared magick. F8 shows the full controls. Classic mode uses the
 original QWER/ASDF elements, LMB movement, RMB casting and Space boost/magick.
