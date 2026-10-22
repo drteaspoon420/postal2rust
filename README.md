@@ -38,10 +38,28 @@ See [progress and remaining work](MAGICKA-INTEGRATION.md) and
 ./play.sh --magicka --map suburbs-1 --magicka-camera classic
 ```
 
-This requires the sibling `../rust-bevy-magicka/output/rewrite` source workspace and
-your own Magicka content. The local content folder is detected at
-`../rust-bevy-magicka/target/Magicka/Content`; use `--magicka-content /path/to/Content`
-for a different install. F6 switches cameras. `--robe`, `--staff` and `--melee`
+The executable finds POSTAL 2 and Magicka in your Steam libraries, including
+custom library locations. Just launch it: Magicka is enabled when available;
+otherwise normal POSTAL 2 starts. Use `--no-magicka` to choose normal POSTAL 2
+even with Magicka installed. `--magicka` remains accepted for existing commands.
+
+On first launch, required Magicka assets are copied into
+`assets/magicka/Content` beside the released executable (in this repository for
+source builds). Native XNB and audio banks are decoded by the game; no separate
+export tools are needed. Later launches reuse the prepared files. Steam's game
+files are left untouched. `--prepare-assets` performs discovery and preparation
+without opening the game.
+
+Manual overrides: `--game /path/to/POSTAL2Complete` or `POSTAL2_DIR`, and
+`--magicka-content /path/to/Magicka/Content` or `MAGICKA_CONTENT`. The Magicka
+override also accepts its install root. An invalid/unreadable Magicka install
+falls back to normal POSTAL 2. Existing local developer content remains a
+fallback after Steam discovery.
+
+Building from source still requires the sibling
+`../rust-bevy-magicka/output/rewrite` source workspace; players using the
+compiled executable do not need that workspace.
+F6 switches cameras. `--robe`, `--staff` and `--melee`
 select original template/item names. Camera-specific controls appear in the HUD.
 
 ## Keybinds

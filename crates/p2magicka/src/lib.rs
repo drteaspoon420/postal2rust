@@ -3,6 +3,7 @@
 pub mod visual;
 pub mod catalog;
 pub mod persistence;
+pub mod install;
 
 pub use magicka_content;
 use magicka_content::level::{LevelModel, NavMesh, TriMesh};

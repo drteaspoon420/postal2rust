@@ -1,5 +1,6 @@
 ghidra_proj/
 /postal2/
+/assets/magicka/
 logs/
 target/
 *.png

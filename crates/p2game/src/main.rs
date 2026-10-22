@@ -134,6 +134,12 @@ fn main() {
         }
         std::process::exit(2);
     }
+    #[cfg(feature = "window")]
+    if has(&a, "--prepare-assets") {
+        println!("POSTAL 2: {}", args.root.display());
+        magicka::enabled();
+        return;
+    }
     p2game::host::register_level_hook(p2game::physics::level_hook);
     // Near a level exit, build the destination's collision world ahead (P2GAME_NO_PRELOAD=1: off).
     p2game::preload::install();

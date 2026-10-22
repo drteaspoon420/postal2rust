@@ -6,10 +6,17 @@ The intended experience is a Magicka wizard causing mayhem in Postal's world.
 
 The sibling `../rust-bevy-magicka/output/rewrite` workspace is the gameplay source.
 `crates/p2magicka` references its runtime, simulation and content crates directly.
-Original assets stay in their existing user-owned locations. Postal scripts and
+Required Magicka assets are prepared from the user's Steam install into the
+host's own `assets/magicka/Content` directory. Postal scripts and
 AI continue to run; the adapter must deliver combat through Postal pawn events.
 
 ## Implementation and verification in progress
+
+- Startup discovers both Steam app manifests (POSTAL 2: 223470, Magicka: 42910)
+  across configured libraries. Optional Magicka content is copied locally in
+  native XNB/XACT formats; campaign levels and source FBX are excluded. Missing
+  or unreadable Magicka content leaves normal Postal weapons and input active.
+  `--no-magicka` explicitly selects normal play; explicit install overrides remain.
 
 - Invisibility uses the original screen-normal refraction and hides held items;
   ethereal bodies use the original luminance/ColdColor additive pass and runtime
@@ -120,10 +127,9 @@ To test the existing build from this directory:
 ./target/release/p2game --game ./postal2 --magicka --windowed --map suburbs-1
 ```
 
-F6 switches cameras. Builds now discover Magicka content beside the running
-executable or working directory, including the sibling
-`rust-bevy-magicka/target/Magicka/Content` checkout. For an older build or a separate
-content installation, supply the location explicitly:
+F6 switches cameras. Builds discover Magicka in Steam libraries and prepare
+`assets/magicka/Content` locally. The sibling developer checkout remains a
+fallback. For a separate content installation, supply the location explicitly:
 
 ```sh
 ./target/release/p2game --game ./postal2 --magicka --windowed --map suburbs-1 \
@@ -131,7 +137,9 @@ content installation, supply the location explicitly:
 ```
 
 `--magicka-content` takes priority over `MAGICKA_CONTENT`, which takes priority
-over automatic discovery. Content remains in the user's original installation.
+over automatic discovery. Originals remain untouched; required files are copied
+into the host directory. Missing Magicka starts normal Postal; `--no-magicka`
+selects it explicitly. Use `--prepare-assets` to prepare without opening a window.
 
 ```sh
 CCACHE_DISABLE=1 cargo check --locked --offline -p p2game -j 2

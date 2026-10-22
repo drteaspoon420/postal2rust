@@ -46,24 +46,47 @@ impl Plugin for MagickaPlugin {
     }
 }
 pub(crate) fn enabled() -> bool {
-    std::env::args().any(|a| a == "--magicka")
+    launch_content().is_some()
 }
 fn option(name: &str) -> Option<String> {
     std::env::args().skip_while(|a| a != name).nth(1)
 }
 fn content_dir() -> Result<PathBuf, String> {
-    option("--magicka-content")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("MAGICKA_CONTENT").map(PathBuf::from))
-        .or_else(|| {
-            p2magicka::discover_content(
-                &std::env::current_exe().ok()?,
-                &std::env::current_dir().ok()?,
-            )
-        })
-        .ok_or_else(|| {
-            "Magicka content was not found beside the project. Use --magicka-content /path/to/Magicka/Content or set MAGICKA_CONTENT.".into()
-        })
+    launch_content().cloned().ok_or_else(|| "Magicka is unavailable; running normal POSTAL 2.".into())
+}
+// Resolve once before any plugin chooses its input/weapon mode. An absent or
+// unreadable optional install must leave the original Postal controls active.
+fn launch_content() -> Option<&'static PathBuf> {
+    static CONTENT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    CONTENT.get_or_init(|| {
+        if std::env::args().any(|a| a == "--no-magicka") { return None; }
+        let executable = std::env::current_exe().ok()?;
+        let directory = p2magicka::install::project_directory(&executable);
+        let explicit = option("--magicka-content").map(PathBuf::from)
+            .or_else(|| std::env::var_os("MAGICKA_CONTENT").map(PathBuf::from));
+        let source = if let Some(path) = explicit {
+            Some(path)
+        } else {
+            let steam = p2game::steam::installs(42910).into_iter()
+                .find_map(|p| p2magicka::install::content_root(&p));
+            steam.or_else(|| p2magicka::install::prepared_content(&directory))
+                .or_else(|| p2magicka::discover_content(&executable, &std::env::current_dir().ok()?))
+        };
+        let Some(source) = source else {
+            println!("Magicka was not found in Steam; starting normal POSTAL 2.");
+            return None;
+        };
+        match p2magicka::install::prepare(&source, &directory) {
+            Ok(content) => {
+                println!("Magicka enabled: {} (use --no-magicka for normal POSTAL 2)", content.display());
+                Some(content)
+            }
+            Err(error) => {
+                eprintln!("Cannot prepare Magicka from {}: {error}. Starting normal POSTAL 2.", source.display());
+                None
+            }
+        }
+    }).as_ref()
 }
 #[derive(Default)]
 pub(crate) struct MagicState {

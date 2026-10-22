@@ -1,5 +1,39 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Session 2026-10-22 (g): portable Steam discovery
+
+- Shared `p2game::steam` discovers native/Flatpak/Snap/macOS/Windows Steam roots,
+  configured libraries, and app manifests for Postal 2 (223470) and Magicka
+  (42910), including custom install names. Actual content is validated.
+- Magicka now enables automatically when available; `--no-magicka` selects
+  normal Postal. Missing content or preparation errors leave native weapons
+  and controls active. Explicit `--magicka-content` / `MAGICKA_CONTENT` retain
+  priority. `--magicka` remains accepted. Postal path overrides remain intact.
+- Preparation copies required native XNB and audio-bank assets into the host's
+  `assets/magicka/Content` (repository root for local builds, beside a standalone
+  executable). Runtime readers decode these directly; no external conversion
+  tools are needed. Campaign levels, FBX and languages are excluded. Imports
+  reuse unchanged files; an interrupted import has no completed marker.
+- Original installs remain untouched. Legacy local developer content is a
+  fallback after Steam/prepared content. `play.sh` no longer forces `./postal2`.
+  `--prepare-assets` discovers/prepares without opening the game.
+- Source builds still depend on the sibling rewrite source workspace. A compiled
+  release does not require that workspace. Private cached assets are gitignored.
+
+Verification: Steam parser/manifest tests **2 pass**; local incremental native
+asset import test **1 passes**. Release rebuilt. A standalone copy under `/tmp`,
+launched from an unrelated working directory, discovered a custom Steam library
+and imported **4,269 files / 1.1 GiB** into its own release folder. Repeated
+preparation copied **0 files**. Missing Magicka selected normal Postal mode.
+The standalone wizard rendered the suburb map from its local cache successfully
+(`/tmp/p2-portable-wizard.log`, `/tmp/p2-portable-steam-check/wizard.png`).
+Local repository cache is prepared too. User requested wrapping up, committing
+and pushing this part after verification; do not expand scope before that.
+Normal-mode fallback also rendered successfully with an unavailable explicit
+Magicka path; native first-person hands loaded and the wizard HUD was absent
+(`/tmp/p2-portable-normal.log`, `/tmp/p2-portable-steam-check/normal.png`). Both
+standalone render runs exited successfully.
+
 ## User-requested later feature
 
 Implement Postal 2 weapons as replacements for the Magicka/first-person

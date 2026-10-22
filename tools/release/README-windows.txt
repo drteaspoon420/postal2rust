@@ -14,6 +14,17 @@ How to play
    The choice is remembered in postal2dir.txt.
 4. To use a different POSTAL 2 folder later, double-click postal2-dir.bat.
 
+Optional Magicka integration
+----------------------------
+Magicka is detected from Steam, including custom libraries, and enabled automatically.
+The first launch copies required Magicka XNB/audio assets to assets/magicka/Content
+inside this extracted Postal2Rust folder. No conversion tools or developer checkout
+are required. Original Steam files are not modified. With no Magicka found, normal
+POSTAL 2 starts. Use --no-magicka to choose normal POSTAL 2 explicitly.
+Use --magicka-content /path/to/Magicka/Content for a manual install, or
+--prepare-assets to prepare files without opening the game. Place this release in
+a folder you can write to so the first-launch asset preparation can finish.
+
 Options (from a command prompt in this folder):
   Postal2Rust.exe --change-folder     ask for the POSTAL 2 folder again
   Postal2Rust.exe --windowed          play in a window instead of fullscreen
