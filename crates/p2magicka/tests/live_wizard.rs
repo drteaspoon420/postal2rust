@@ -382,6 +382,196 @@ fn installed_catalog_loads_original_robes_staffs_and_melee_models() {
 }
 
 #[test]
+fn saved_wizard_roundtrip_retains_health_shield_status_queue_items_and_haste() {
+    use p2magicka::{
+        magicka_sim::status::{Status, StatusEffect},
+        persistence::SavedWizard,
+    };
+    let mut source = world();
+    element(&mut source, 2);
+    frames(
+        &mut source,
+        PlayerInput {
+            cast_self_down: true,
+            ..Default::default()
+        },
+        45,
+    );
+    frames(&mut source, PlayerInput::default(), 20);
+    assert!(source.avatar().character.combat.health.shield.health > 0.);
+    source.avatar_mut().character.combat.health.hit_points = 370.25;
+    source
+        .avatar_mut()
+        .character
+        .combat
+        .statuses
+        .set_effect(StatusEffect::new(Status::Wet, 0., 0.7, false))
+        .unwrap();
+    source.avatar_mut().character.combat.statuses.current_mask = Status::Wet as u16;
+    let staff = &mut source
+        .avatar_mut()
+        .items
+        .iter_mut()
+        .find(|(s, _)| *s == 1)
+        .unwrap()
+        .1;
+    staff.special_cooldown = 7.25;
+    let weapon = &mut source
+        .avatar_mut()
+        .items
+        .iter_mut()
+        .find(|(s, _)| *s == 0)
+        .unwrap()
+        .1;
+    weapon.cooldown = 0.75;
+    weapon.spells.add(
+        p2magicka::magicka_sim::spells::Spell::default_for(Elements::FIRE),
+        false,
+        &mut vec![],
+    );
+    source.session.world.cast_magick(0, MagickType::Haste);
+    element(&mut source, 0);
+    let saved = SavedWizard::capture(&source, true);
+    let encoded = saved.encode().unwrap();
+    let decoded = SavedWizard::decode(&encoded).unwrap();
+    assert_eq!(saved, decoded);
+    let mut destination = world();
+    decoded.restore(&mut destination).unwrap();
+    assert_eq!(
+        SavedWizard::capture(&destination, true),
+        saved,
+        "restoring into a fresh host must retain every serialized player field"
+    );
+    assert!(
+        destination
+            .session
+            .world
+            .ability_effects
+            .hasted(destination.avatar().handle)
+    );
+    let health = destination.avatar().character.combat.health.hit_points;
+    destination.receive_damage(
+        p2magicka::magicka_sim::damage::Damage {
+            attack: p2magicka::magicka_sim::damage::attack::DAMAGE,
+            element: Elements::EARTH.0,
+            amount: 50.,
+            magnitude: 1.,
+        },
+        None,
+        destination.body().position,
+    );
+    assert_eq!(
+        destination.avatar().character.combat.health.hit_points,
+        health,
+        "restored self-shield must still block incoming host damage"
+    );
+    assert!(
+        destination.avatar().character.combat.health.shield.health
+            < source.avatar().character.combat.health.shield.health
+    );
+    for _ in 0..700 {
+        destination.step(DT).unwrap();
+    }
+    assert!(
+        !destination
+            .session
+            .world
+            .ability_effects
+            .hasted(destination.avatar().handle)
+    );
+}
+
+#[test]
+fn saved_resistance_ward_keeps_its_damage_rules_and_remaps_buff_ids() {
+    use p2magicka::persistence::SavedWizard;
+    let mut source = world();
+    element(&mut source, 2); // shield
+    element(&mut source, 7); // fire immunity aura
+    frames(
+        &mut source,
+        PlayerInput {
+            cast_self_down: true,
+            ..Default::default()
+        },
+        45,
+    );
+    frames(&mut source, PlayerInput::default(), 15);
+    assert!(
+        !source.avatar().character.auras.is_empty(),
+        "original cast must create an elemental ward"
+    );
+    assert!(!source.avatar().character.buffs.list.is_empty());
+    let old_id = source.avatar().character.auras[0].visual.buff_id;
+    let saved =
+        SavedWizard::decode(&SavedWizard::capture(&source, false).encode().unwrap()).unwrap();
+    let mut restored = world();
+    saved.restore(&mut restored).unwrap();
+    let new_id = restored.avatar().character.auras[0].visual.buff_id;
+    assert_ne!(
+        old_id, new_id,
+        "old effect IDs cannot collide with new-world auras"
+    );
+    assert!(
+        restored
+            .avatar()
+            .character
+            .buffs
+            .list
+            .iter()
+            .any(|b| b.id == new_id)
+    );
+    let hit = p2magicka::magicka_sim::damage::Damage {
+        attack: p2magicka::magicka_sim::damage::attack::DAMAGE,
+        element: Elements::FIRE.0,
+        amount: 100.,
+        magnitude: 1.,
+    };
+    let before = restored.avatar().character.combat.health.hit_points;
+    source.receive_damage(hit, None, source.body().position);
+    restored.receive_damage(hit, None, restored.body().position);
+    assert_eq!(
+        restored.avatar().character.combat.health.hit_points,
+        before,
+        "the restored fire ward must still block fire damage"
+    );
+    assert_eq!(
+        restored.avatar().character.combat.health.hit_points,
+        source.avatar().character.combat.health.hit_points
+    );
+}
+
+#[test]
+fn saved_wizard_rejects_corruption_and_restores_dead_state() {
+    use p2magicka::persistence::SavedWizard;
+    let mut source = world();
+    let valid = SavedWizard::capture(&source, false).encode().unwrap();
+    assert!(SavedWizard::decode("not JSON").is_err());
+    assert!(SavedWizard::decode(&valid.replace("\"version\":1", "\"version\":999")).is_err());
+    assert!(SavedWizard::decode(&valid.replace("\"kind\":0", "\"kind\":99")).is_err());
+    assert!(
+        SavedWizard::decode(&valid.replace("\"hit_points\":1000.0", "\"hit_points\":null"))
+            .is_err()
+    );
+    source.avatar_mut().character.combat.health.hit_points = -25.;
+    source.avatar_mut().character.combat.dead = true;
+    source
+        .avatar_mut()
+        .items
+        .iter_mut()
+        .for_each(|(_, item)| item.attached = false);
+    let dead =
+        SavedWizard::decode(&SavedWizard::capture(&source, false).encode().unwrap()).unwrap();
+    let mut destination = world();
+    dead.restore(&mut destination).unwrap();
+    assert!(destination.avatar().dead());
+    assert_eq!(
+        destination.avatar().character.combat.health.hit_points,
+        -25.
+    );
+    assert!(destination.avatar().items.iter().all(|(_, i)| !i.attached));
+}
+
+#[test]
 fn particle_sprite_sheets_decode_with_content() {
     let content = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../re-lab-starter/target/Magicka/Content");

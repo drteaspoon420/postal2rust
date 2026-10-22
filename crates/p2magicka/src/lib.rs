@@ -2,6 +2,7 @@
 //! magicka-runtime; this crate owns coordinates, content and host integration.
 pub mod visual;
 pub mod catalog;
+pub mod persistence;
 
 pub use magicka_content;
 use magicka_content::level::{LevelModel, NavMesh, TriMesh};
@@ -88,7 +89,7 @@ pub fn postal_level(triangles: impl IntoIterator<Item = [[f32; 3]; 3]>) -> Level
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Loadout {
     pub robe: String,
     pub staff: Option<String>,

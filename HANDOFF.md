@@ -1,6 +1,63 @@
 # Agent handoff: Magicka wizard in Postal 2
 
-## Latest continuation: in-game loadouts (2026-10-22)
+## Latest continuation: player saves and travel (2026-10-22)
+
+Implemented `p2magicka::persistence::SavedWizard`, a versioned JSON player
+snapshot. It retains actual robe/equipment, camera, health and damage
+accumulators, self-shield data, all nine elemental status slots plus their
+cached mask, conjure/prepared spell storage, item enchantments/cooldowns and
+gun clip/timer/spread/tracer fields, resistance auras/buffs, Haste TTL and levitation timers. Render
+references and old actor handles do not cross the boundary; ward buff IDs are
+remapped consistently. Restore validates the entire snapshot and loadout before
+applying it to a freshly constructed world.
+
+Postal `Game` now holds opaque save extensions and adapter save errors. The
+existing `.p2r` sidecar hex-encodes extension keys/payloads, preserving arbitrary
+Unicode/newlines without injecting sidecar statements. `.usa` is unchanged.
+Loads replace the extension map (legacy saves clear it); travel carries it.
+The wizard publishes at initialized/frame boundaries and restores on map/save
+replacement. Fresh native pawns after death get fresh health with the chosen
+gear; dead saved snapshots retain the dead flag. Invalid/loading snapshots block
+new saves with an explicit error. Legacy native saves initialize the CLI robe
+using native saved health instead of inheriting the previous wizard.
+
+Found and fixed a Postal save issue: after loading `Save17`, resaving recorded
+`map=save17` and could lose the original geometry on the next load. Sidecars now
+use the host's original map identity. Also added the missing `window` feature
+guard on `magicka_fx` (headless compilation had tried to build render code) and
+Home-key support in the real-input QA driver.
+
+Verification:
+
+- Release build and default check pass; `cargo check --locked --offline
+  --no-default-features -p p2game -j 2` passes.
+- Full bridge suite: 2 unit + 11 integration tests passed; the subsequently added
+  elemental ward test passed separately (12 integration tests total). One item
+  bounds diagnostic remains intentionally ignored. New tests cover complete
+  serialized-field roundtrip, shield damage after restore, wet status, enchanted
+  weapons, cooldowns, Haste expiry, invalid versions/data, dead-state retention,
+  and functioning restored fire immunity with remapped buff IDs.
+- Postal sidecar unit test passes for Unicode/newlines and corrupt encodings.
+- `P2GAME_SMOKE_OFFSCREEN=1 tools/magicka-save-smoke.sh` PASSED. It changes the
+  gear/camera after saving a hurt, shielded Arctic wizard; restores the older
+  slot; travels to suburbs-2; loads in a fresh process; resaves to another slot;
+  then loads that in a third process and verifies original collision geometry.
+  The initial test expected a loaded map key of `suburbs-1`; the port names that
+  VM package `save17` while retaining original geometry. Corrected the test to
+  distinguish package identity from geometry rather than changing the adapter.
+- Visually inspected restored, traveled and resaved-load screenshots under
+  `out/magicka/persistence/`. Isolated save directory from the passing run:
+  `out/magicka/persistence/user.UFZPjV/Save/`.
+
+Still incomplete: this is player continuity, not a full Magicka-world save.
+General timed staff special-ability buffs, transformations, active cast/animation
+state, projectiles, summons and mirrored NPC statuses need further persistence.
+In particular a frozen Postal NPC's native speed may be saved without its
+Magicka thaw timer; address NPC status snapshots before claiming world parity.
+Broader live melee/staff/magick behavior and camera/first-person fidelity remain
+required by the original objective. Do not mark the overall goal complete.
+
+## Previous continuation: in-game loadouts (2026-10-22)
 
 Implemented `p2magicka::catalog::Catalog` and `WizardWorld::equip` on top of
 the existing rewrite's loadout API. The original install enumerates 41 robes,

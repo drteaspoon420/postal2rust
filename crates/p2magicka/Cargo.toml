@@ -11,3 +11,5 @@ magicka-sim = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-si
 magicka-content = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-content" }
 
 magicka-xnb = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-xnb" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

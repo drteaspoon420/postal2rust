@@ -54,6 +54,11 @@ pub struct Game {
     /// refilled, so old ids are out of range or name different objects. (A map `Arc` address is
     /// not a safe key: the next map can be allocated at the freed address.)
     pub level_serial: u64,
+    /// Opaque host gameplay snapshots, retained through travel and written in
+    /// the save sidecar. Namespaces keep optional adapters out of the VM data.
+    pub save_extensions: std::collections::BTreeMap<String, String>,
+    pub save_extension_errors: std::collections::BTreeMap<String, String>,
+    pub loaded_from_save: bool,
 }
 
 impl Game {
@@ -80,13 +85,14 @@ impl Game {
     /// Hands the level to the VM world and spawns the GameInfo (no events yet).
     pub fn new(mut world: World, level: Level, game_override: Option<&str>) -> Self {
         let host = std::rc::Rc::new(crate::host::GameHost::new(world.library()));
-        let mut g = Game { world, level, host, game_info: None, game_class: "(none)".into(), player_controller: None, accessed_none: 0, accessed_none_by: Default::default(), log_lines: 0, time: 0.0, portal: String::new(), level_serial: 0 };
+        let mut g = Game { world, level, host, game_info: None, game_class: "(none)".into(), player_controller: None, accessed_none: 0, accessed_none_by: Default::default(), log_lines: 0, time: 0.0, portal: String::new(), level_serial: 0, save_extensions: Default::default(), save_extension_errors: Default::default(), loaded_from_save: false };
         g.setup(game_override);
         g
     }
 
     /// Installs `self.level` into the VM world: actor list, nav network, a fresh host, GameInfo.
     fn setup(&mut self, game_override: Option<&str>) {
+        self.loaded_from_save = false;
         let t0 = std::time::Instant::now();
         self.level_serial += 1;
         let world = &mut self.world;

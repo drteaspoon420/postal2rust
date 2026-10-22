@@ -6220,6 +6220,8 @@ dependencies = [
  "magicka-runtime",
  "magicka-sim",
  "magicka-xnb",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

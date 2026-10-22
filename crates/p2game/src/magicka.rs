@@ -3,6 +3,7 @@
 use crate::{ui::UiInput, window::Sim};
 use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 use p2magicka::{Loadout, PlayerInput, WizardWorld, magicka_runtime::avatar::AvatarEvent};
+use p2magicka::persistence::SavedWizard;
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
 mod wardrobe;
@@ -22,7 +23,7 @@ impl Plugin for MagickaPlugin {
             ..default()
         })
         .add_plugins(crate::magicka_fx::MagickaFxPlugin)
-        .add_systems(Startup, (hud_setup, wardrobe::setup))
+        .add_systems(Startup, (hud_setup, wardrobe::setup, persistence_pending))
         .add_systems(Update, wardrobe::draw.after(tick))
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
@@ -72,6 +73,22 @@ pub(crate) struct MagicState {
 }
 impl MagicState {
     pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
+}
+fn persistence_pending(mut sim: NonSendMut<Sim>) {
+    sim.game.save_extension_errors.insert("magicka".into(), "Wizard is still loading".into());
+}
+fn publish_wizard(wizard: &WizardWorld, classic: bool, game: &mut p2game::boot::Game) -> Result<(), String> {
+    match SavedWizard::capture(wizard, classic).encode() {
+        Ok(payload) => {
+            game.save_extensions.insert("magicka".into(), payload);
+            game.save_extension_errors.remove("magicka");
+            Ok(())
+        }
+        Err(error) => {
+            game.save_extension_errors.insert("magicka".into(), error.clone());
+            Err(error)
+        }
+    }
 }
 struct Mirror {
     handle: u16,
@@ -156,14 +173,19 @@ pub(crate) fn tick(
     let Some(pawn) = vm.get_prop(pc, "Pawn").and_then(Value::as_obj) else {
         return;
     };
-    if !ui.game_look || ui.captured || sim.paused {
-        return;
-    }
     let level_key = format!("{}:{}", sim.game.level.map.name, sim.game.level_serial);
     if state.map != level_key || state.pawn != Some(pawn) {
+        let level_changed = state.map != level_key;
+        let saved = if level_changed {
+            sim.game.save_extensions.get("magicka").map(|text| SavedWizard::decode(text)).transpose()
+        } else { Ok(None) };
         state.map = level_key;
         state.error = None;
         state.mirrors.clear();
+        state.wardrobe.open = false;
+        state.notices.clear();
+        state.recent_elements = (0, 0.);
+        state.clock = 0.;
         // Rebuild all collision and actor handles on travel. Gear persistence
         // is handled by the host loadout, independent of Postal package ids.
         if let Some(collision) = p2game::physics::level_collision() {
@@ -171,7 +193,9 @@ pub(crate) fn tick(
             if let Some(bounds) = collision.bounds() {
                 collision.for_tris_in(&bounds, |t| tris.push(t.map(|p| p.to_array())));
             }
-            let loadout = state.world.as_ref().map(WizardWorld::equipped_loadout).unwrap_or_else(|| Loadout {
+            let loadout = saved.as_ref().ok().and_then(|s| s.as_ref()).map(|s| s.loadout.clone())
+                .or_else(|| (!level_changed).then(|| state.world.as_ref().map(WizardWorld::equipped_loadout)).flatten())
+                .unwrap_or_else(|| Loadout {
                 robe: option("--robe").unwrap_or_else(|| "Wizard".into()),
                 staff: option("--staff"),
                 weapon: option("--melee"),
@@ -184,16 +208,39 @@ pub(crate) fn tick(
                 .unwrap_or_default()[1] as f32
                 * std::f32::consts::TAU
                 / 65536.;
-            match content_dir().and_then(|content| {
-                WizardWorld::new(
+            let native_health = vm.get_prop(pawn, "Health").map(Value::as_float).unwrap_or(100.);
+            let loaded_from_save = sim.game.loaded_from_save;
+            match saved.and_then(|saved| content_dir().and_then(|content| {
+                let mut world = WizardWorld::new(
                     &content,
                     p2magicka::postal_level(tris),
                     loadout,
                     position,
                     [yaw.cos(), yaw.sin(), 0.],
-                )
-            }) {
+                )?;
+                if let Some(saved) = saved {
+                    state.classic = saved.classic;
+                    // A fresh native pawn after death is a respawn; loading an
+                    // actual dead save retains its death state instead.
+                    if !saved.dead() || loaded_from_save {
+                        saved.restore(&mut world)?;
+                        let c = &world.avatar().character.combat;
+                        println!("MAGICKA RESTORED {} camera={} hp={} shield={} status={:#x} queue={} {:?}", state.map,
+                            if state.classic { "classic" } else { "first-person" },
+                            c.health.hit_points, c.health.shield.health, c.statuses.current_mask,
+                            world.avatar().conjure.queue.len(), world.equipped_loadout());
+                    }
+                } else if loaded_from_save && level_changed {
+                    let hp = &mut world.avatar_mut().character.combat.health;
+                    hp.hit_points = (native_health * HEALTH_SCALE).min(hp.max_hit_points);
+                    world.avatar_mut().character.combat.dead = native_health <= 0.;
+                }
+                Ok(world)
+            })) {
                 Ok(world) => {
+                    if let Err(error) = publish_wizard(&world, state.classic, &mut sim.game) {
+                        state.notices = format!("Wizard state could not be saved: {error}");
+                    }
                     println!(
                         "MAGICKA: hosted wizard and Postal collision for {}",
                         state.map
@@ -206,11 +253,12 @@ pub(crate) fn tick(
                         .set_prop(pawn, "Health", Value::Int(health));
                     state.published_health = Some(health);
                     state.pawn = Some(pawn);
-                    state.death_delivered = false;
+                    state.death_delivered = world.avatar().dead();
                     state.world = Some(world);
                 }
                 Err(error) => {
                     eprintln!("MAGICKA: {error}");
+                    sim.game.save_extension_errors.insert("magicka".into(), error.clone());
                     state.error = Some(error);
                     state.world = None;
                 }
@@ -223,6 +271,7 @@ pub(crate) fn tick(
         }
         return;
     }
+    if !ui.game_look || ui.captured || sim.paused { return; }
     if keys.just_pressed(KeyCode::F6) {
         state.classic = !state.classic;
     }
@@ -713,6 +762,9 @@ pub(crate) fn tick(
             queue,
             state.notices
         );
+    }
+    if let Err(error) = publish_wizard(wizard, state.classic, &mut sim.game) {
+        state.notices = format!("Wizard state could not be saved: {error}");
     }
 }
 

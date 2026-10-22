@@ -102,7 +102,13 @@ pub fn write_save_with(game: &Game, slot_name: &str, use_cache: bool) -> (Vec<u8
     let mut st = SaveStats::default();
     let mut w = PackageWriter::new();
     let mut sidecar = String::new();
-    sidecar += &format!("map={}\n", game.level.map.name);
+    // A loaded level's package is SaveN. Geometry still comes from the map
+    // installed on the host; keep that identity when saving a loaded game.
+    let source_map = game.host.map_name.borrow().clone();
+    sidecar += &format!("map={}\n", if source_map.is_empty() { &game.level.map.name } else { &source_map });
+    for (namespace, payload) in &game.save_extensions {
+        sidecar += &format!("extension {} {}\n", hex_text(namespace), hex_text(payload));
+    }
 
     // Objects to write: LevelInfo, MyLevel, actors, then referenced non-actor objects.
     let mut order: Vec<ObjId> = Vec::new();
@@ -647,6 +653,22 @@ struct Sidecar {
     code: HashMap<String, (String, usize)>,
     latent: HashMap<String, (String, u16, f32, Vec<String>)>,
     disabled: HashMap<String, u64>,
+    extensions: BTreeMap<String, String>,
+}
+
+fn hex_text(text: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(text.len() * 2);
+    for byte in text.bytes() { write!(out, "{byte:02x}").unwrap(); }
+    out
+}
+fn unhex_text(text: &str) -> Option<String> {
+    if text.len() % 2 != 0 { return None }
+    let bytes = text.as_bytes().chunks_exact(2).map(|pair| {
+        let digit = |b: u8| (b as char).to_digit(16).map(|v| v as u8);
+        Some(digit(pair[0])? * 16 + digit(pair[1])?)
+    }).collect::<Option<Vec<_>>>()?;
+    String::from_utf8(bytes).ok()
 }
 
 fn read_sidecar(path: &Path) -> Sidecar {
@@ -655,6 +677,15 @@ fn read_sidecar(path: &Path) -> Sidecar {
     for l in t.lines() {
         if let Some(m) = l.strip_prefix("map=") {
             s.map = Some(m.to_string());
+        } else if let Some(r) = l.strip_prefix("extension ") {
+            if let Some((namespace, payload)) = r.split_once(' ') {
+                if let Some(namespace) = unhex_text(namespace) {
+                    // Retain corrupt known payloads as invalid data so their
+                    // owning adapter reports an error instead of resetting it.
+                    s.extensions.insert(namespace, unhex_text(payload)
+                        .unwrap_or_else(|| "invalid save extension encoding".into()));
+                }
+            }
         } else if let Some(r) = l.strip_prefix("code ") {
             let p: Vec<&str> = r.splitn(3, ' ').collect();
             if p.len() == 3 {
@@ -710,6 +741,8 @@ pub fn load_into(game: &mut Game, save: std::sync::Arc<Package>, sidecar_path: O
 /// round-trip comparisons).
 pub fn load_into_with(game: &mut Game, save: std::sync::Arc<Package>, sidecar_path: Option<&Path>, post_load: bool) -> LoadStats {
     let sc = sidecar_path.map(read_sidecar).unwrap_or_default();
+    game.save_extensions = sc.extensions.clone();
+    game.save_extension_errors.clear();
     let mut st = LoadStats::default();
     // The map: sidecar, else LevelInfo.Title / Level URL; geometry and nav come from it.
     let map_name = sc.map.clone().or_else(|| level_url_map(&save)).unwrap_or_default();
@@ -851,6 +884,7 @@ fn install_loaded_level(game: &mut Game, lv: Level, map_pkg: Option<std::sync::A
     game.time = 0.0;
     game.level = lv;
     game.level_serial += 1;
+    game.loaded_from_save = true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -858,6 +892,11 @@ fn install_loaded_level(game: &mut Game, lv: Level, map_pkg: Option<std::sync::A
 
 /// Saves the current level into `slot` of `dir` (package + sidecar + slot ini line).
 pub fn save_slot(game: &Game, dir: &Path, slot: i32, slot_name: &str) -> std::io::Result<SaveStats> {
+    if !game.save_extension_errors.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            game.save_extension_errors.iter().map(|(name, error)| format!("{name}: {error}"))
+                .collect::<Vec<_>>().join("; ")));
+    }
     let t0 = std::time::Instant::now();
     std::fs::create_dir_all(dir)?;
     let (bytes, sidecar, st) = write_save(game, slot_name);
@@ -1191,6 +1230,23 @@ pub fn empty_stats() -> LevelStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sidecar_extensions_keep_unicode_newlines_and_report_corrupt_payloads() {
+        let path = std::env::temp_dir().join(format!("p2r-sidecar-{}.p2r", std::process::id()));
+        let payload = "{\"robe\":\"Wizard\",\"note\":\"雪\"}\ncode not-an-actor\u{1f}";
+        std::fs::write(&path, format!("map=suburbs-1\nextension {} {}\n",
+            hex_text("magicka"), hex_text(payload))).unwrap();
+        let sidecar = read_sidecar(&path);
+        assert_eq!(sidecar.extensions.get("magicka").map(String::as_str), Some(payload));
+        assert_eq!(sidecar.map.as_deref(), Some("suburbs-1"));
+        assert!(sidecar.code.is_empty(), "extension newlines cannot inject sidecar statements");
+        std::fs::write(&path, format!("extension {} invalid-hex\n", hex_text("magicka"))).unwrap();
+        assert_eq!(read_sidecar(&path).extensions["magicka"], "invalid save extension encoding");
+        std::fs::remove_file(path).unwrap();
+        assert!(unhex_text("0").is_none());
+        assert!(unhex_text("ff").is_none());
+    }
 
     #[test]
     fn time_format() {

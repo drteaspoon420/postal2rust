@@ -91,6 +91,7 @@ fn keycode(name: &str) -> Option<KeyCode> {
         "F12" => KeyCode::F12,
         "Delete" | "Del" => KeyCode::Delete,
         "End" => KeyCode::End,
+        "Home" => KeyCode::Home,
         "PageUp" => KeyCode::PageUp,
         "PageDown" => KeyCode::PageDown,
         "Period" | "." => KeyCode::Period,
