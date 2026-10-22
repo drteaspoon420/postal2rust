@@ -38,9 +38,9 @@ See [progress and remaining work](MAGICKA-INTEGRATION.md) and
 ./play.sh --magicka --map suburbs-1 --magicka-camera classic
 ```
 
-This requires the sibling `../re-lab-starter/output/rewrite` source workspace and
+This requires the sibling `../rust-bevy-magicka/output/rewrite` source workspace and
 your own Magicka content. The local content folder is detected at
-`../re-lab-starter/target/Magicka/Content`; use `--magicka-content /path/to/Content`
+`../rust-bevy-magicka/target/Magicka/Content`; use `--magicka-content /path/to/Content`
 for a different install. F6 switches cameras. `--robe`, `--staff` and `--melee`
 select original template/item names. Camera-specific controls appear in the HUD.
 

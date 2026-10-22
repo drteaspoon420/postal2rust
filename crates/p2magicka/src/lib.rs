@@ -24,7 +24,7 @@ pub fn discover_content(executable: &Path, working_directory: &Path) -> Option<P
     for anchor in executable.parent().into_iter().chain([working_directory]) {
         for directory in anchor.ancestors() {
             for relative in [
-                "re-lab-starter/target/Magicka/Content",
+                "rust-bevy-magicka/target/Magicka/Content",
                 "target/Magicka/Content",
                 "Magicka/Content",
                 "Content",
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn content_discovery_survives_relocation_and_unrelated_working_directory() {
         let root = std::env::temp_dir().join(format!("p2magicka-discovery-{}", std::process::id()));
-        let content = root.join("moved workspace/re-lab-starter/target/Magicka/Content");
+        let content = root.join("moved workspace/rust-bevy-magicka/target/Magicka/Content");
         let wizard = content.join("data/characters/Wizard.xnb");
         std::fs::create_dir_all(wizard.parent().unwrap()).unwrap();
         std::fs::write(&wizard, []).unwrap();

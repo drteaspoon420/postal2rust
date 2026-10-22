@@ -6,10 +6,10 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-magicka-runtime = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-runtime" }
-magicka-sim = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-sim" }
-magicka-content = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-content" }
+magicka-runtime = { path = "../../../rust-bevy-magicka/output/rewrite/crates/magicka-runtime" }
+magicka-sim = { path = "../../../rust-bevy-magicka/output/rewrite/crates/magicka-sim" }
+magicka-content = { path = "../../../rust-bevy-magicka/output/rewrite/crates/magicka-content" }
 
-magicka-xnb = { path = "../../../re-lab-starter/output/rewrite/crates/magicka-xnb" }
+magicka-xnb = { path = "../../../rust-bevy-magicka/output/rewrite/crates/magicka-xnb" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

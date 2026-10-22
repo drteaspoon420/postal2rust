@@ -166,8 +166,8 @@ verification, not intended behavior as if it already worked.
 - Postal repository: this directory (`postal2rust`). User confirmed the
   unmodified port built and ran successfully using `./play.sh`.
 - Postal original files: `postal2/` (gitignored). Read only.
-- Magicka source: `../re-lab-starter/output/rewrite`.
-- Magicka original content: `../re-lab-starter/target/Magicka/Content`. Read only.
+- Magicka source: `../rust-bevy-magicka/output/rewrite`.
+- Magicka original content: `../rust-bevy-magicka/target/Magicka/Content`. Read only.
 - Magicka source commit at integration start: `0122b23`.
 - The Magicka repository has unrelated user changes to `mods/load_order.toml`
   and untracked evidence. Preserve them. Read its AGENTS.md before editing it.

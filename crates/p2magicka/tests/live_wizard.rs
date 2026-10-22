@@ -25,7 +25,7 @@ fn world() -> WizardWorld {
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../re-lab-starter/target/Magicka/Content")
+                .join("../../../rust-bevy-magicka/target/Magicka/Content")
         });
     let floor = postal_level([
         [
@@ -584,7 +584,7 @@ fn saved_wizard_rejects_corruption_and_restores_dead_state() {
 #[test]
 fn particle_sprite_sheets_decode_with_content() {
     let content = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../re-lab-starter/target/Magicka/Content");
+        .join("../../../rust-bevy-magicka/target/Magicka/Content");
     let sheets = p2magicka::visual::particle_sheets(&content).unwrap();
     assert_eq!(sheets.len(), 4);
     for v in sheets {

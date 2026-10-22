@@ -12,6 +12,44 @@ use sim::{
     status::{Status, StatusEffect},
 };
 
+/// Serde form of `Spell` (the simulation crate carries no serde).
+mod spell_repr {
+    use super::{Deserialize, Serialize, Spell, sim};
+    use serde::{Deserializer, Serializer};
+    #[derive(Serialize, Deserialize)]
+    struct Repr {
+        element: u32,
+        mag: [f32; 11],
+        magick: u8,
+    }
+    fn from(s: &Spell) -> Repr {
+        Repr { element: s.element.0, mag: s.mag, magick: s.magick as u8 }
+    }
+    fn into<E: serde::de::Error>(r: Repr) -> Result<Spell, E> {
+        Ok(Spell {
+            element: sim::spells::Elements(r.element),
+            mag: r.mag,
+            magick: sim::spells::MagickType::try_from(r.magick)
+                .map_err(|_| E::custom("invalid magick type"))?,
+        })
+    }
+    pub fn serialize<S: Serializer>(s: &Spell, ser: S) -> Result<S::Ok, S::Error> {
+        from(s).serialize(ser)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Spell, D::Error> {
+        into(Repr::deserialize(de)?)
+    }
+    pub mod list {
+        use super::*;
+        pub fn serialize<S: Serializer>(s: &[Spell], ser: S) -> Result<S::Ok, S::Error> {
+            s.iter().map(from).collect::<Vec<_>>().serialize(ser)
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Vec<Spell>, D::Error> {
+            Vec::<Repr>::deserialize(de)?.into_iter().map(into).collect()
+        }
+    }
+}
+
 macro_rules! float_state {
     ($name:ident, $source:ty, $($field:ident),+ $(,)?) => {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,14 +70,13 @@ float_state!(
     fire_damage,
     poison_damage,
     healing,
-    bleed_damage,
-    damage_taken_percent,
-    max_health_bonus
+    bleed_damage
 );
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Shield {
     kind: u8,
+    #[serde(with = "spell_repr")]
     spell: Spell,
     health: f32,
     ice_magnitude: f32,
@@ -100,6 +137,7 @@ struct Item {
     attached: bool,
     cooldown: f32,
     special_cooldown: f32,
+    #[serde(with = "spell_repr::list")]
     spells: Vec<Spell>,
     gun_clip: i32,
     gun_timer: f32,
@@ -155,7 +193,9 @@ pub struct SavedWizard {
     statuses: Vec<(u16, f32, f32, f32, bool)>,
     status_mask: u16,
     dry_timer: f32,
+    #[serde(with = "spell_repr::list")]
     queue: Vec<Spell>,
+    #[serde(with = "spell_repr")]
     prepared: Spell,
     items: Vec<Item>,
     auras: Vec<Aura>,

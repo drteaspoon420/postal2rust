@@ -4,7 +4,7 @@ Goal: bring the Magicka rewrite's player, robes, casting, staffs, melee weapons
 and magicks into Postal 2, with both first-person and classic Magicka cameras.
 The intended experience is a Magicka wizard causing mayhem in Postal's world.
 
-The sibling `../re-lab-starter/output/rewrite` workspace is the gameplay source.
+The sibling `../rust-bevy-magicka/output/rewrite` workspace is the gameplay source.
 `crates/p2magicka` references its runtime, simulation and content crates directly.
 Original assets stay in their existing user-owned locations. Postal scripts and
 AI continue to run; the adapter must deliver combat through Postal pawn events.
@@ -94,12 +94,12 @@ To test the existing build from this directory:
 
 F6 switches cameras. Builds now discover Magicka content beside the running
 executable or working directory, including the sibling
-`re-lab-starter/target/Magicka/Content` checkout. For an older build or a separate
+`rust-bevy-magicka/target/Magicka/Content` checkout. For an older build or a separate
 content installation, supply the location explicitly:
 
 ```sh
 ./target/release/p2game --game ./postal2 --magicka --windowed --map suburbs-1 \
-  --magicka-content ../re-lab-starter/target/Magicka/Content
+  --magicka-content ../rust-bevy-magicka/target/Magicka/Content
 ```
 
 `--magicka-content` takes priority over `MAGICKA_CONTENT`, which takes priority
