@@ -4,7 +4,7 @@ set -euo pipefail
 project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$project_dir"
 mkdir -p out/magicka/loadout
-export P2GAME_REAL='25:key F7;32:key Right;36:key Down;40:key Right;44:key Down;48:key Right;52:key Enter;58:key 6;60:mdown left;63:mup left;65:key F7;78:key 8;82:mdown left;96:mup left;100:key F6;110:key F7;125:key Escape'
+export P2GAME_REAL='25:key F7;32:key Right;36:key Down;40:key Right;44:key Down;48:key Right;50:key Down;51:key Right;54:key Enter;58:key 6;60:mdown left;63:mup left;65:key F7;78:key 8;82:mdown left;96:mup left;100:key F6;110:key F7;125:key Escape'
 export P2GAME_SHOTS='30:out/magicka/loadout/open.png;56:out/magicka/loadout/equipped.png;75:out/magicka/loadout/first-person.png;90:out/magicka/loadout/cast.png;105:out/magicka/loadout/classic.png;120:out/magicka/loadout/classic-panel.png;135:out/magicka/loadout/closed.png'
 export P2GAME_EXIT=145
 export P2GAME_EXIT_SECS=180
@@ -28,6 +28,7 @@ timeout 210s "${smoke_runner[@]}" \
 # A fresh launch must enumerate the real content and apply our three selections.
 rg -q 'MAGICKA CATALOG [1-9][0-9]* robes [1-9][0-9]* staffs [1-9][0-9]* melee weapons' out/magicka/loadout/log.txt
 rg -q 'MAGICKA EQUIPPED' out/magicka/loadout/log.txt
+rg -q 'MAGICKA COLOUR Red' out/magicka/loadout/log.txt
 if rg -q 'panicked at|Could not equip|MAGICKA visual:' out/magicka/loadout/log.txt; then
     echo 'Loadout smoke failed; inspect out/magicka/loadout/log.txt' >&2
     exit 1

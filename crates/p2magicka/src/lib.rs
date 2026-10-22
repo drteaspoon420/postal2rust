@@ -111,6 +111,7 @@ pub struct WizardWorld {
     pub session: PlaySession,
     pub content: PathBuf,
     pub loadout: Loadout,
+    pub robe_colour: [f32; 3],
 }
 impl WizardWorld {
     pub fn new(
@@ -170,6 +171,7 @@ impl WizardWorld {
             session,
             content: content.into(),
             loadout,
+            robe_colour: [1.; 3],
         })
     }
     pub fn world(&self) -> &SceneWorld<FsSceneContent> {

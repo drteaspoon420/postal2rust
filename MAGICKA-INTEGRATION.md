@@ -22,11 +22,19 @@ AI continue to run; the adapter must deliver combat through Postal pawn events.
   Native walking/look/casting input is suppressed while choosing. The world
   continues running. Selection keeps health fraction, statuses and wards, and
   unchanged equipment keeps its cooldowns/enchantments.
+- F7's Colour category offers 12 robe colours. Colour survives player saves
+  and map travel; older saves default to white. Basic skinned materials now
+  combine the original detail and tinted fabric maps, including their combined
+  alpha coverage, instead of cutting holes through recolourable fabric.
+- Projectiles now use the original Earth, IceEarth and Ice3 models at authored
+  size with velocity orientation. Model-less projectiles retain native effects.
+  This corrects the sphere stand-ins; it does not establish projectile or spell
+  combination parity. Launch/muzzle alignment and broader effects need work.
 - Versioned wizard snapshots now accompany Postal's normal save/load and map
   travel. They retain loadout, camera, health, self-shield, elemental statuses,
   spell/enchantment queues, equipment cooldowns, resistance wards and Haste.
   This is player continuity; it does not yet save the entire Magicka world.
-- PASSED: 2 unit tests and 12 local-content integration tests, including original
+- PASSED: 3 unit tests and 13 local-content integration tests, including original
   rig/model loading for 41 robes, 80 staffs and 159 melee weapons. Coverage also
   includes queue rules, healing, Haste expiry, beam hits, particle assets,
   incoming damage/shields, and transactional loadout selection.

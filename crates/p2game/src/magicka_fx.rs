@@ -1,7 +1,7 @@
 //! Magicka spell presentation inside Postal's renderer: the original particle
 //! effects (sprays, impacts, statuses, chants), railgun beams and lightning
 //! bolts with materials ported from the rewrite viewer, plus simple shapes for
-//! shields, barriers, mines and missiles. Magicka world space (metres, Y up)
+//! shields, barriers and mines, and original missile models. Magicka world space (metres, Y up)
 //! is Postal's Bevy world space (`p2view::scene::to_bevy`), so positions pass
 //! through unchanged.
 use crate::magicka::MagicState;
@@ -294,8 +294,10 @@ struct FxState {
     glows: Pool,
     glow_materials: Vec<Handle<AdditiveMaterial>>,
     solids: Pool,
+    missiles: Pool,
+    missile_models:
+        std::collections::HashMap<String, Vec<(Handle<Mesh>, Handle<StandardMaterial>)>>,
 }
-
 
 fn volume_image(v: &p2magicka::visual::Volume) -> Image {
     let base = (v.width * v.height * v.depth * 4) as usize;
@@ -452,7 +454,9 @@ fn place(
     pool.used += 1;
     if index == pool.entities.len() {
         let entity = spawn(commands);
-        commands.entity(entity).insert((transform, Visibility::Visible));
+        commands
+            .entity(entity)
+            .insert((transform, Visibility::Visible));
         pool.entities.push(entity);
     } else if let Ok((mut t, mut v)) = transforms.get_mut(pool.entities[index]) {
         *t = transform;
@@ -691,15 +695,17 @@ fn sync(
         let ice = element.0 & Elements::ICE.0 != 0 || barrier.draw_ice;
         if earth || ice {
             solids.push((
-                Transform::from_translation(p + Vec3::Y * r)
-                    .with_scale(Vec3::new(r * 0.7, r * 2.0, r * 0.7)),
+                Transform::from_translation(p + Vec3::Y * r).with_scale(Vec3::new(
+                    r * 0.7,
+                    r * 2.0,
+                    r * 0.7,
+                )),
                 ice && !earth,
             ));
         }
         if barrier.kind == p2magicka::magicka_sim::barrier::BarrierKind::Elemental || !earth {
             glows.push((
-                Transform::from_translation(p + Vec3::Y * r)
-                    .with_scale(Vec3::new(r, r * 2.0, r)),
+                Transform::from_translation(p + Vec3::Y * r).with_scale(Vec3::new(r, r * 2.0, r)),
                 element_color(element),
                 0.35,
                 true,
@@ -708,8 +714,9 @@ fn sync(
     }
     for mine in world.mines.slots.iter().flatten() {
         glows.push((
-            Transform::from_translation(Vec3::from(mine.position) + Vec3::Y * 0.05)
-                .with_scale(Vec3::new(0.4 * mine.scale.max(0.5), 1., 0.4 * mine.scale.max(0.5))),
+            Transform::from_translation(Vec3::from(mine.position) + Vec3::Y * 0.05).with_scale(
+                Vec3::new(0.4 * mine.scale.max(0.5), 1., 0.4 * mine.scale.max(0.5)),
+            ),
             element_color(mine.spell.element),
             if mine.activated { 0.9 } else { 0.5 },
             true,
@@ -748,9 +755,13 @@ fn sync(
         } else {
             shared.sphere.clone()
         };
-        let index = place(&mut commands, &mut fx.glows, &mut transforms, transform, |c| {
-            c.spawn((Mesh3d(mesh.clone()), NotShadowCaster)).id()
-        });
+        let index = place(
+            &mut commands,
+            &mut fx.glows,
+            &mut transforms,
+            transform,
+            |c| c.spawn((Mesh3d(mesh.clone()), NotShadowCaster)).id(),
+        );
         let entity = fx.glows.entities[index];
         commands
             .entity(entity)
@@ -758,23 +769,90 @@ fn sync(
     }
     finish(&mut fx.glows, &mut transforms);
 
-    // Earth/ice projectiles and barriers as solid rock or ice.
+    // The original models encode magnitude/recipe size. Collider radius is
+    // not a render scale; model-less missiles are drawn by their native effects.
     for missile in &world.missiles {
         let body = &missile.body;
         if body.dead {
             continue;
         }
-        let ice = matches!(
-            body.model,
-            Some(p2magicka::magicka_sim::missile_events::MissileModel::Ice3)
-                | Some(p2magicka::magicka_sim::missile_events::MissileModel::IceEarth(_))
-        );
-        solids.push((
-            Transform::from_translation(Vec3::from(body.position))
-                .with_scale(Vec3::splat(body.radius.max(0.1))),
-            ice,
-        ));
+        let asset = match (body.model, &body.item_model) {
+            (Some(model), _) => format!(
+                "Models/Missiles/{}",
+                p2magicka::magicka_runtime::missiles::model_name(model)
+            ),
+            (None, Some(item)) => item.clone(),
+            (None, None) => continue,
+        };
+        if !fx.missile_models.contains_key(&asset) {
+            let parts = match p2magicka::visual::model_parts(&wizard.content, &asset) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    eprintln!("MAGICKA missile model: {error}");
+                    Vec::new()
+                }
+            };
+            let mut handles = Vec::new();
+            for part in parts {
+                let texture = part.texture.map(|t| {
+                    images.add(Image::new(
+                        Extent3d {
+                            width: t.width,
+                            height: t.height,
+                            depth_or_array_layers: 1,
+                        },
+                        TextureDimension::D2,
+                        t.rgba,
+                        TextureFormat::Rgba8UnormSrgb,
+                        RenderAssetUsages::default(),
+                    ))
+                });
+                let mut mesh = Mesh::new(
+                    PrimitiveTopology::TriangleList,
+                    RenderAssetUsages::default(),
+                );
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part.geometry.positions);
+                if let Some(uv) = part.geometry.uvs {
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+                }
+                mesh.insert_indices(Indices::U32(part.geometry.indices));
+                mesh.compute_smooth_normals();
+                let material = standard.add(StandardMaterial {
+                    base_color: Color::srgb(part.color[0], part.color[1], part.color[2]),
+                    base_color_texture: texture,
+                    alpha_mode: if part.cutout {
+                        AlphaMode::Mask(0.5)
+                    } else {
+                        AlphaMode::Opaque
+                    },
+                    cull_mode: None,
+                    perceptual_roughness: 0.8,
+                    ..default()
+                });
+                handles.push((meshes.add(mesh), material));
+            }
+            fx.missile_models.insert(asset.clone(), handles);
+        }
+        let [x, y, z, w] = body.render_orientation().to_quaternion();
+        let transform = Transform {
+            translation: Vec3::from(body.position),
+            rotation: Quat::from_xyzw(x, y, z, w),
+            ..default()
+        };
+        for (mesh, material) in &fx.missile_models[&asset] {
+            let index = place(
+                &mut commands,
+                &mut fx.missiles,
+                &mut transforms,
+                transform,
+                |c| c.spawn(NoFrustumCulling).id(),
+            );
+            commands
+                .entity(fx.missiles.entities[index])
+                .insert((Mesh3d(mesh.clone()), MeshMaterial3d(material.clone())));
+        }
     }
+    finish(&mut fx.missiles, &mut transforms);
     for (transform, ice) in solids {
         let material = if ice {
             shared.ice.clone()
@@ -782,9 +860,13 @@ fn sync(
             shared.rock.clone()
         };
         let mesh = shared.sphere.clone();
-        let index = place(&mut commands, &mut fx.solids, &mut transforms, transform, |c| {
-            c.spawn(Mesh3d(mesh.clone())).id()
-        });
+        let index = place(
+            &mut commands,
+            &mut fx.solids,
+            &mut transforms,
+            transform,
+            |c| c.spawn(Mesh3d(mesh.clone())).id(),
+        );
         let entity = fx.solids.entities[index];
         commands.entity(entity).insert(MeshMaterial3d(material));
     }

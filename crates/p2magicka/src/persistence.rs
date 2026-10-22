@@ -2,6 +2,9 @@
 //! object ids and render handles are reconstructed in the destination world.
 use crate::{Loadout, WizardWorld, magicka_runtime as runtime, magicka_sim as sim};
 use serde::{Deserialize, Serialize};
+fn white() -> [f32; 3] {
+    [1.; 3]
+}
 use sim::{
     character_health::{CharacterHealth, SelfShield, SelfShieldType},
     magicks::{AbilityEffect, Haste},
@@ -143,6 +146,8 @@ pub struct SavedWizard {
     version: u32,
     pub loadout: Loadout,
     pub classic: bool,
+    #[serde(default = "white")]
+    pub robe_colour: [f32; 3],
     health: Health,
     shield: Shield,
     dead: bool,
@@ -171,6 +176,7 @@ impl SavedWizard {
             version: 1,
             loadout: world.equipped_loadout(),
             classic,
+            robe_colour: world.robe_colour,
             health: Health::capture(&c.combat.health),
             shield: Shield::capture(&c.combat.health.shield),
             dead: c.combat.dead,
@@ -271,7 +277,11 @@ impl SavedWizard {
         if self.version != 1 {
             return Err(format!("unsupported wizard save version {}", self.version));
         }
-        if self.health.max_hit_points <= 0.
+        if self
+            .robe_colour
+            .iter()
+            .any(|c| !c.is_finite() || !(0. ..=1.).contains(c))
+            || self.health.max_hit_points <= 0.
             || self.shield.kind > 4
             || self.status_mask & !0x1ff != 0
         {
@@ -355,6 +365,7 @@ impl SavedWizard {
         {
             return Err("wizard saved equipment no longer matches installed content".into());
         }
+        world.robe_colour = self.robe_colour;
         let avatar = world.avatar_mut();
         let c = &mut avatar.character;
         self.health.restore(&mut c.combat.health);

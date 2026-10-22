@@ -1,5 +1,35 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Wrap-up: robe colour/coverage and missile presentation (2026-10-22)
+
+User requested wrapping up after a successful compilation and pushing the
+branch to their fork, https://github.com/drteaspoon420/postal2rust. Original
+Postal content must remain excluded. `postal2/` is ignored and untracked.
+
+Fixed basic skinned material loading to blend original detail and fabric
+textures with the rewrite's documented soft-light/normal blend. Combined alpha
+coverage restores recolourable areas that the single-texture cutout removed.
+F7 now includes 12 named robe colours, stored in backward-compatible wizard
+snapshots (missing colour defaults to white). Render reload includes colour.
+
+Missiles use original Earth0..3, IceEarth0..3 and Ice3 models/materials at authored
+size and native velocity orientation instead of collider-sized generic spheres.
+Model-less missiles are left to native effects. Barrier stand-ins remain.
+
+Verification: release build passes; 3 unit and 12 existing content integration
+tests pass, plus the new nine-model projectile loading test passes separately.
+One pre-existing item-bounds diagnostic remains ignored. Save roundtrip covers
+nonwhite robe colour. Offscreen loadout smoke passes colour selection, equip,
+cast suppression/resumption and both cameras; inspected classic and colour-panel
+screenshots in `out/magicka/loadout/`. All content/screenshots/caches stay local.
+
+The user reports incorrect projectile spells and combination/effects. Those
+mechanical and broader presentation issues remain open: this wrap-up only fixes
+the identified model stand-ins and robe material issue. First-person force casts
+still use native third-person staff origins and planar input aiming; investigate
+source/aim adaptation without replacing original recipe/charge/impact logic.
+No sibling Magicka rewrite files were changed during this wrap-up.
+
 ## Latest continuation: player saves and travel (2026-10-22)
 
 Implemented `p2magicka::persistence::SavedWizard`, a versioned JSON player

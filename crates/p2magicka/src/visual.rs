@@ -22,6 +22,94 @@ pub struct Part {
     pub slot: Option<i32>,
     pub color: [f32; 3],
     pub texture: Option<Texture>,
+    pub cutout: bool,
+}
+
+fn external(object: &Option<XnaObject>) -> Option<&str> {
+    match object.as_ref()? {
+        XnaObject::Asset(a) => match a.as_ref() {
+            Asset::External(p) => p.as_deref(),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The basic skinned shader blends detail with a separately tinted fabric map.
+/// Alpha is coverage, including the overlay, rather than a recolour cutout.
+fn fabric_pixel(
+    detail: [f32; 4],
+    overlay: [f32; 4],
+    diffuse: [f32; 3],
+    tint: [f32; 3],
+    weight: f32,
+    soft: bool,
+) -> [u8; 4] {
+    let a = overlay[3] * weight;
+    let mut out = [0; 4];
+    for i in 0..3 {
+        let b = overlay[i];
+        let t = tint[i];
+        let fabric = if !soft {
+            b * t
+        } else if t < 0.5 {
+            (1. - 2. * t) * b * b + 2. * b * t
+        } else {
+            (2. * t - 1.) * b.sqrt() + 2. * b * (1. - t)
+        };
+        out[i] =
+            ((detail[i] * diffuse[i] * (1. - a) + fabric * a).clamp(0., 1.) * 255.).round() as u8;
+    }
+    out[3] = ((a + detail[3] * (1. - a)).clamp(0., 1.) * 255.).round() as u8;
+    out
+}
+
+fn skinned_texture(
+    content: &Path,
+    asset: &str,
+    effect: &magicka_content::assets::SkinnedModelBasicEffect,
+    tint: [f32; 3],
+) -> Option<Texture> {
+    let load_map = |i: usize| -> Option<Texture> {
+        if !effect.map_enabled[i] {
+            return None;
+        }
+        texture(content, asset, external(effect.maps.get(i)?)?)
+    };
+    let detail = load_map(0);
+    let overlay = load_map(1);
+    let width = detail
+        .as_ref()
+        .map_or(1, |t| t.width)
+        .max(overlay.as_ref().map_or(1, |t| t.width));
+    let height = detail
+        .as_ref()
+        .map_or(1, |t| t.height)
+        .max(overlay.as_ref().map_or(1, |t| t.height));
+    let sample = |t: &Option<Texture>, x: u32, y: u32, fallback: [f32; 4]| {
+        t.as_ref().map_or(fallback, |t| {
+            let index = (((y * t.height / height) * t.width + x * t.width / width) * 4) as usize;
+            std::array::from_fn(|i| t.rgba[index + i] as f32 / 255.)
+        })
+    };
+    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            rgba.extend_from_slice(&fabric_pixel(
+                sample(&detail, x, y, [1.; 4]),
+                sample(&overlay, x, y, [0.; 4]),
+                effect.diffuse_color,
+                tint,
+                effect.diffuse1_alpha,
+                effect.use_soft_light_blend,
+            ));
+        }
+    }
+    Some(Texture {
+        width,
+        height,
+        rgba,
+    })
 }
 fn read(content: &Path, asset: &str) -> Result<magicka_content::Parsed, String> {
     let path = play_content::resolve(content, &Path::new(asset).with_extension("xnb"))
@@ -121,11 +209,34 @@ fn parts(
                 .and_then(|i| shared.get(i))
                 .and_then(Option::as_ref);
             let (color, reference) = material(effect);
+            let basic = match effect {
+                Some(XnaObject::Asset(a)) => match a.as_ref() {
+                    Asset::SkinnedModelBasicEffect(e) => Some(e),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let cutout = match effect {
+                Some(XnaObject::RenderDeferredEffect(e)) => {
+                    !e.layer0.alpha_mask_enabled && !e.layer0.diffuse_alpha_disabled
+                }
+                Some(XnaObject::Asset(a)) => matches!(
+                    a.as_ref(),
+                    Asset::SkinnedModelBasicEffect(_)
+                        | Asset::SkinnedModelDeferredNormalMappedEffect(_)
+                ),
+                _ => false,
+            };
             out.push(Part {
                 geometry,
                 slot,
-                color: std::array::from_fn(|i| color[i] * tint[i]),
-                texture: reference.and_then(|p| texture(content, asset, &p)),
+                color: if basic.is_some() { [1.; 3] } else { color },
+                texture: if let Some(e) = basic {
+                    skinned_texture(content, asset, e, tint)
+                } else {
+                    reference.and_then(|p| texture(content, asset, &p))
+                },
+                cutout,
             });
         }
     }
@@ -153,7 +264,7 @@ pub fn load(wizard: &WizardWorld) -> Result<Vec<Part>, String> {
                 geometry,
                 &model.shared,
                 None,
-                entry.tint,
+                std::array::from_fn(|i| entry.tint[i] * wizard.robe_colour[i]),
             ));
         }
     }
@@ -265,6 +376,60 @@ pub fn texture2d(content: &Path, name: &str) -> Result<Texture, String> {
         )
         .ok_or_else(|| format!("{name}: undecodable format {}", t.format))?,
     })
+}
+
+/// Original rigid model parts, including material textures, at authored size.
+pub fn model_parts(content: &Path, name: &str) -> Result<Vec<Part>, String> {
+    let parsed = read(content, name)?;
+    let Content::Xna(object) = parsed.content else {
+        return Err(format!("{name}: not an XNA model"));
+    };
+    let XnaObject::Model(model) = *object else {
+        return Err(format!("{name}: not a model"));
+    };
+    Ok(parts(
+        content,
+        name,
+        &model,
+        &parsed.shared,
+        Some(0),
+        [1.; 3],
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn fabric_overlay_restores_coverage_and_preserves_detail() {
+        // Transparent detail is the fabric region, not a hole in the robe.
+        assert_eq!(
+            fabric_pixel(
+                [0.; 4],
+                [0.5, 0.5, 0.5, 1.],
+                [1.; 3],
+                [1., 0., 0.],
+                1.,
+                false
+            ),
+            [128, 0, 0, 255]
+        );
+        assert_eq!(
+            fabric_pixel(
+                [0.2, 0.4, 0.8, 1.],
+                [1., 1., 1., 0.],
+                [1.; 3],
+                [1., 0., 0.],
+                1.,
+                true
+            ),
+            [51, 102, 204, 255]
+        );
+        assert_eq!(
+            fabric_pixel([0.; 4], [1., 1., 1., 0.], [1.; 3], [1.; 3], 1., false)[3],
+            0
+        );
+    }
 }
 /// A particle sprite sheet volume: RGBA bytes of every mip level in order.
 pub struct Volume {

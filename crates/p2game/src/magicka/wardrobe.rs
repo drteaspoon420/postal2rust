@@ -2,12 +2,27 @@
 use super::*;
 use p2magicka::catalog::Catalog;
 
+const COLOURS: &[(&str, [f32; 3])] = &[
+    ("White", [1., 1., 1.]),
+    ("Red", [0.85, 0.06, 0.04]),
+    ("Blue", [0.04, 0.18, 0.9]),
+    ("Green", [0.08, 0.6, 0.12]),
+    ("Yellow", [1., 0.8, 0.04]),
+    ("Purple", [0.5, 0.08, 0.8]),
+    ("Cyan", [0.04, 0.8, 0.85]),
+    ("Orange", [1., 0.3, 0.03]),
+    ("Pink", [1., 0.25, 0.6]),
+    ("Black", [0.03, 0.03, 0.03]),
+    ("Grey", [0.35, 0.35, 0.35]),
+    ("Brown", [0.3, 0.12, 0.04]),
+];
+
 #[derive(Default)]
 pub(super) struct Wardrobe {
     pub open: bool,
     catalog: Option<Catalog>,
     row: usize,
-    indices: [usize; 3],
+    indices: [usize; 4],
     message: String,
 }
 
@@ -46,6 +61,10 @@ impl Wardrobe {
                             .unwrap_or(0);
                     }
                     self.message = "Choose your loadout, then press Enter to equip.".into();
+                    self.indices[3] = COLOURS
+                        .iter()
+                        .position(|(_, rgb)| *rgb == wizard.robe_colour)
+                        .unwrap_or(0);
                 }
             }
         }
@@ -57,14 +76,18 @@ impl Wardrobe {
             return;
         }
         if keys.just_pressed(KeyCode::ArrowUp) {
-            self.row = (self.row + 2) % 3;
+            self.row = (self.row + 3) % 4;
         }
         if keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::Tab) {
-            self.row = (self.row + 1) % 3;
+            self.row = (self.row + 1) % 4;
         }
         let Some(catalog) = &self.catalog else { return };
-        let list = [&catalog.robes, &catalog.staffs, &catalog.weapons][self.row];
-        if !list.is_empty() {
+        let count = if self.row == 3 {
+            COLOURS.len()
+        } else {
+            [&catalog.robes, &catalog.staffs, &catalog.weapons][self.row].len()
+        };
+        if count > 0 {
             let step = if keys.just_pressed(KeyCode::ArrowRight) {
                 1
             } else if keys.just_pressed(KeyCode::ArrowLeft) {
@@ -77,12 +100,12 @@ impl Wardrobe {
                 0
             };
             self.indices[self.row] =
-                (self.indices[self.row] as i32 + step).rem_euclid(list.len() as i32) as usize;
+                (self.indices[self.row] as i32 + step).rem_euclid(count as i32) as usize;
             if keys.just_pressed(KeyCode::Home) {
                 self.indices[self.row] = 0;
             }
             if keys.just_pressed(KeyCode::End) {
-                self.indices[self.row] = list.len() - 1;
+                self.indices[self.row] = count - 1;
             }
         }
         if keys.just_pressed(KeyCode::Enter) {
@@ -99,8 +122,13 @@ impl Wardrobe {
                 weapon: Some(weapon.clone()),
             }) {
                 Ok(()) => {
+                    wizard.robe_colour = COLOURS[self.indices[3]].1;
                     self.message = "Equipped. F7 or Esc returns to the mayhem.".into();
                     println!("MAGICKA EQUIPPED {:?}", wizard.equipped_loadout());
+                    println!(
+                        "MAGICKA COLOUR {} {:?}",
+                        COLOURS[self.indices[3]].0, wizard.robe_colour
+                    );
                 }
                 Err(error) => self.message = format!("Could not equip: {error}"),
             }
@@ -136,6 +164,14 @@ impl Wardrobe {
                 ));
             }
         }
+        let (name, _) = COLOURS[self.indices[3]];
+        text.push_str(&format!(
+            "{} Colour  ({}/{})\n   {}\n",
+            if self.row == 3 { ">" } else { " " },
+            self.indices[3] + 1,
+            COLOURS.len(),
+            name
+        ));
         text.push_str("\nUp/Down category · Left/Right choose\nPgUp/PgDn skip 10 · Home/End first/last\nEnter equip · F6 camera · F7/Esc close\n\n");
         text.push_str(&self.message);
         text.push_str("\n\nThe world keeps running while you choose.");

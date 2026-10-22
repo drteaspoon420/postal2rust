@@ -808,6 +808,7 @@ struct FirstPersonHands {
 struct WizardDraws {
     map: String,
     loadout: Option<Loadout>,
+    colour: [f32; 3],
     parts: Vec<(p2magicka::visual::Part, Entity, Handle<Mesh>)>,
 }
 fn visuals(
@@ -825,12 +826,13 @@ fn visuals(
 ) {
     let Some(wizard) = &state.world else { return };
     let loadout = wizard.equipped_loadout();
-    if draws.map != state.map || draws.loadout.as_ref() != Some(&loadout) {
+    if draws.map != state.map || draws.loadout.as_ref() != Some(&loadout) || draws.colour != wizard.robe_colour {
         for (_, entity, _) in draws.parts.drain(..) {
             commands.entity(entity).despawn();
         }
         draws.map.clone_from(&state.map);
         draws.loadout = Some(loadout);
+        draws.colour = wizard.robe_colour;
         match p2magicka::visual::load(wizard) {
             Ok(parts) => {
                 println!(
@@ -870,7 +872,7 @@ fn visuals(
                         base_color_texture: texture,
                         perceptual_roughness: 0.85,
                         cull_mode: None,
-                        alpha_mode: AlphaMode::Mask(0.3),
+                        alpha_mode: if part.cutout { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque },
                         ..default()
                     });
                     let entity = commands

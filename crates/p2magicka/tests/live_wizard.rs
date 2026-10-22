@@ -11,6 +11,15 @@ const DT: f32 = 1. / 60.;
 /// Postal maps sit far below Magicka's default -50 m kill plane (suburbs-1
 /// is around Z -4300), so the test floor does too.
 const FLOOR: f32 = -4300.;
+#[test]
+fn original_projectile_models_load_at_authored_size() {
+    let w = world();
+    for name in ["Earth0", "Earth1", "Earth2", "Earth3", "IceEarth0", "IceEarth1", "IceEarth2", "IceEarth3", "Ice3"] {
+        let parts = p2magicka::visual::model_parts(&w.content, &format!("Models/Missiles/{name}")).unwrap();
+        assert!(!parts.is_empty(), "{name}");
+        assert!(parts.iter().any(|p| !p.geometry.indices.is_empty() && p.texture.is_some()), "{name}: original geometry and texture");
+    }
+}
 fn world() -> WizardWorld {
     let content = std::env::var_os("MAGICKA_CONTENT")
         .map(PathBuf::from)
@@ -388,6 +397,7 @@ fn saved_wizard_roundtrip_retains_health_shield_status_queue_items_and_haste() {
         persistence::SavedWizard,
     };
     let mut source = world();
+    source.robe_colour = [0.85, 0.06, 0.04];
     element(&mut source, 2);
     frames(
         &mut source,
