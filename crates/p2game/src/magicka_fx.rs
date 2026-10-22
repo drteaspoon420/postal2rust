@@ -299,6 +299,11 @@ struct FxState {
     /// Keyed by model and baked fabric tint.
     effect_models: std::collections::HashMap<(&'static str, [u8; 3]), Option<EffectModel>>,
     animated: Vec<Animated>,
+    shields: std::collections::HashMap<u16, (Entity, Handle<AdditiveMaterial>, Handle<Mesh>)>,
+    additional_beams: Vec<(Entity, Handle<Mesh>)>,
+    additional_material: Option<Handle<AdditiveMaterial>>,
+    arcane_blasts: Option<(Entity, Handle<Mesh>)>,
+    arcane_disc: Option<Option<Handle<Image>>>,
 }
 struct EffectModel {
     effect: p2magicka::visual::SkinnedEffect,
@@ -546,7 +551,7 @@ fn sync(
 
     if std::env::var_os("MAGICKA_TRACE").is_some() {
         println!(
-            "MAGICKA FX particles={} beams={} bolts={} shields={} missiles={} barriers={:?} mines={}",
+            "MAGICKA FX particles={} beams={} bolts={} shields={} missiles={} barriers={:?} mines={} arcane_blasts={} beam_blasts={}",
             session.effects.particles.active().len(),
             session.beams.len(),
             session.bolts.len(),
@@ -554,6 +559,8 @@ fn sync(
             world.missiles.len(),
             world.barriers.slots.iter().flatten().map(|b| (b.solid(), b.dead, b.position, b.earth_clip.time)).collect::<Vec<_>>(),
             world.mines.slots.iter().flatten().count(),
+            session.arcane_blasts.len(),
+            session.beam_blasts.len(),
         );
     }
     // Original particle effects: sprays, impacts, status emitters, chants.
@@ -562,9 +569,12 @@ fn sync(
     }
 
     // Railgun beams (arcane/life beams and their combinations).
+    // Rails carrying additional elements draw only their element billboards
+    // (Railgun AdditionalRenderData), below.
     let draws: Vec<_> = session
         .beams
         .iter()
+        .filter(|r| r.additional == Elements::NONE)
         .flat_map(beam_mesh::rail_draws)
         .collect();
     for (i, d) in draws.iter().enumerate() {
@@ -693,28 +703,27 @@ fn sync(
     // Glowing shapes: spell shields, elemental barriers, mines and the
     // wizard's self-shield ward.
     let mut glows: Vec<(Transform, [f32; 3], f32, bool)> = Vec::new();
-    for s in &world.shields {
-        let shield = &s.shield;
-        let alpha = shield.tint[3].clamp(0.0, 1.0);
-        let forward = Vec3::from(shield.forward).normalize_or(Vec3::NEG_Z);
-        let scale = match shield.kind {
-            p2magicka::magicka_sim::shield_entity::ShieldKind::Wall => {
-                Vec3::new(shield.radius, shield.radius * 0.5, 0.15)
-            }
-            p2magicka::magicka_sim::shield_entity::ShieldKind::Disc => {
-                Vec3::new(shield.radius, shield.radius, 0.1)
-            }
-            _ => Vec3::splat(shield.radius),
-        };
-        glows.push((
-            Transform::from_translation(Vec3::from(shield.position))
-                .looking_to(forward, Vec3::Y)
-                .with_scale(scale),
-            [shield.tint[0], shield.tint[1], shield.tint[2]],
-            0.18 * alpha,
-            false,
-        ));
-    }
+    spell_shields(&mut commands, &mut fx.shields, world, eye, &mut meshes, &mut additive, &mut transforms);
+    additional_beams(
+        &mut commands,
+        (&mut fx.additional_beams, &mut fx.additional_material),
+        &shared.beam_texture,
+        session,
+        &cameras,
+        &mut meshes,
+        &mut additive,
+        &mut transforms,
+    );
+    arcane_blasts(
+        &mut commands,
+        (&mut fx.arcane_blasts, &mut fx.arcane_disc),
+        wizard,
+        session,
+        &mut images,
+        &mut meshes,
+        &mut additive,
+        &mut transforms,
+    );
     // Earth and ice walls and spell mines: the original skinned models with
     // their emerge clips at the simulation's clip times (viewer sync_barriers
     // and sync_mines placement).
@@ -1036,4 +1045,302 @@ fn sync(
             commands.entity(entity).despawn();
         }
     }
+}
+
+/// Additive effect geometry on an identity transform, as the original draws it.
+fn additive_mesh(
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+) -> Mesh {
+    let normals = vec![[0.0f32, 1.0, 0.0]; positions.len()];
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    mesh.insert_indices(Indices::U32(indices));
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh
+}
+
+/// Spherical shell up to `max_angle` from -Z (viewer `shield_mesh`).
+fn shield_mesh(max_angle: f32) -> Mesh {
+    let (rings, segments) = (16u32, 48u32);
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut uvs = Vec::new();
+    for r in 0..=rings {
+        let theta = max_angle * r as f32 / rings as f32;
+        for k in 0..=segments {
+            let phi = std::f32::consts::TAU * k as f32 / segments as f32;
+            let p = [theta.sin() * phi.cos(), theta.sin() * phi.sin(), -theta.cos()];
+            positions.push(p);
+            normals.push(p);
+            uvs.push([k as f32 / segments as f32, r as f32 / rings as f32]);
+        }
+    }
+    let mut indices = Vec::new();
+    let row = segments + 1;
+    for r in 0..rings {
+        for k in 0..segments {
+            let (a, b, c, d) = (r * row + k, r * row + k + 1, (r + 1) * row + k, (r + 1) * row + k + 1);
+            indices.extend([a, c, b, b, c, d, a, b, c, b, d, c]);
+        }
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+/// Spell shields: the sphere, the forward disc (a quarter-angle cap) and the
+/// Shield wall's own mesh, as additive shells tinted by the shield colour and
+/// fade with a view-dependent rim (viewer `sync_shields`; ShieldEffect's
+/// noise/refraction is not ported there either).
+#[allow(clippy::too_many_arguments)]
+fn spell_shields(
+    commands: &mut Commands,
+    draws: &mut std::collections::HashMap<u16, (Entity, Handle<AdditiveMaterial>, Handle<Mesh>)>,
+    world: &p2magicka::magicka_runtime::scene_world::SceneWorld<
+        p2magicka::magicka_runtime::play_content::FsSceneContent,
+    >,
+    eye: [f32; 3],
+    meshes: &mut Assets<Mesh>,
+    additive: &mut Assets<AdditiveMaterial>,
+    transforms: &mut Query<(&mut Transform, &mut Visibility)>,
+) {
+    use p2magicka::magicka_sim::shield_entity::ShieldKind;
+    let live: std::collections::HashSet<u16> = world.shields.iter().map(|s| s.handle).collect();
+    draws.retain(|handle, (entity, ..)| {
+        let keep = live.contains(handle);
+        if !keep {
+            commands.entity(*entity).despawn();
+        }
+        keep
+    });
+    for s in &world.shields {
+        let shield = &s.shield;
+        let alpha = shield.tint[3].clamp(0.0, 1.0) * std::env::var("SHIELD_A").ok().and_then(|v| v.parse().ok()).unwrap_or(0.35f32);
+        let color = Vec4::new(shield.tint[0] * alpha, shield.tint[1] * alpha, shield.tint[2] * alpha, 1.0);
+        let forward = Vec3::from(shield.forward).normalize_or(Vec3::NEG_Z);
+        let transform = Transform::from_translation(Vec3::from(shield.position))
+            .looking_to(forward, Vec3::Y)
+            .with_scale(Vec3::splat(if shield.kind == ShieldKind::Wall { 1.0 } else { shield.radius }));
+        if let std::collections::hash_map::Entry::Vacant(slot) = draws.entry(s.handle) {
+            let material = additive.add(AdditiveMaterial {
+                color,
+                flags: UVec4::new(0, 1, 0, 0),
+                texture: None,
+            });
+            let mesh = if shield.kind == ShieldKind::Wall {
+                let wall = p2magicka::magicka_sim::shield_wall::mesh();
+                let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, wall.positions);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, wall.normals);
+                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, wall.uv);
+                mesh.insert_indices(Indices::U32(wall.indices));
+                meshes.add(mesh)
+            } else {
+                meshes.add(shield_mesh(if shield.kind == ShieldKind::Disc {
+                    std::f32::consts::FRAC_PI_4
+                } else {
+                    std::f32::consts::PI
+                }))
+            };
+            let entity = commands
+                .spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(material.clone()),
+                    transform,
+                    Visibility::Visible,
+                    NotShadowCaster,
+                    NoFrustumCulling,
+                ))
+                .id();
+            slot.insert((entity, material, mesh));
+        }
+        let (entity, material, mesh) = draws[&s.handle].clone();
+        if let Some(mut m) = additive.get_mut(&material) {
+            m.color = color;
+        }
+        if let Ok((mut t, mut v)) = transforms.get_mut(entity) {
+            *t = transform;
+            *v = Visibility::Visible;
+        }
+        // Rim: brighter where the shell is seen edge-on.
+        let view = (transform.translation - Vec3::from(eye)).normalize_or(Vec3::NEG_Z);
+        if let Some(mut m) = meshes.get_mut(&mesh) {
+            let rim: Option<Vec<[f32; 4]>> = m
+                .attribute(Mesh::ATTRIBUTE_NORMAL)
+                .and_then(|a| a.as_float3())
+                .map(|normals| {
+                    normals
+                        .iter()
+                        .map(|n| {
+                            let f = 1.0 - (transform.rotation * Vec3::from(*n)).dot(view).abs();
+                            let k = 0.3 + 2.5 * f * f * f;
+                            [k, k, k, 1.0]
+                        })
+                        .collect()
+                });
+            if let Some(rim) = rim {
+                m.insert_attribute(Mesh::ATTRIBUTE_COLOR, rim);
+            }
+        }
+    }
+}
+
+/// Railgun AdditionalRenderData: per additional element two textured
+/// billboards over EffectTextures/Beams tinted by the element (viewer
+/// `sync_additional_beams`).
+#[allow(clippy::too_many_arguments)]
+fn additional_beams(
+    commands: &mut Commands,
+    (pool, material): (&mut Vec<(Entity, Handle<Mesh>)>, &mut Option<Handle<AdditiveMaterial>>),
+    beam_texture: &Handle<Image>,
+    session: &p2magicka::magicka_runtime::play_session::PlaySession,
+    cameras: &Query<&GlobalTransform, With<crate::window::FlyCam>>,
+    meshes: &mut Assets<Mesh>,
+    additive: &mut Assets<AdditiveMaterial>,
+    transforms: &mut Query<(&mut Transform, &mut Visibility)>,
+) {
+    let (eye, forward) = cameras.iter().next().map_or(([0.0; 3], [0.0, 0.0, -1.0]), |t| {
+        (t.translation().to_array(), t.forward().to_array())
+    });
+    let material = material
+        .get_or_insert_with(|| {
+            additive.add(AdditiveMaterial {
+                color: Vec4::ONE,
+                flags: UVec4::new(1, 1, 0, 0),
+                texture: Some(beam_texture.clone()),
+            })
+        })
+        .clone();
+    let rails: Vec<_> = session
+        .beams
+        .iter()
+        .filter(|r| r.additional != Elements::NONE)
+        .map(|r| beam_mesh::additional_quads(r, eye, forward))
+        .collect();
+    for (i, quads) in rails.iter().enumerate() {
+        let (mut positions, mut uvs, mut colors, mut indices) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for q in quads {
+            let base = positions.len() as u32;
+            positions.extend(q.positions);
+            uvs.extend(q.uvs);
+            colors.extend([[q.tint[0], q.tint[1], q.tint[2], 1.0]; 4]);
+            indices.extend([0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2].map(|k| base + k));
+        }
+        let mesh = additive_mesh(positions, uvs, colors, indices);
+        if i == pool.len() {
+            let handle = meshes.add(mesh);
+            let entity = commands
+                .spawn((
+                    Mesh3d(handle.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Visible,
+                    NotShadowCaster,
+                    NoFrustumCulling,
+                ))
+                .id();
+            pool.push((entity, handle));
+            continue;
+        }
+        let (entity, handle) = pool[i].clone();
+        if let Some(mut m) = meshes.get_mut(&handle) {
+            *m = mesh;
+        }
+        if let Ok((_, mut v)) = transforms.get_mut(entity) {
+            *v = Visibility::Visible;
+        }
+    }
+    for (entity, _) in pool.iter().skip(rails.len()) {
+        if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+            *v = Visibility::Hidden;
+        }
+    }
+}
+
+/// ArcaneBlast RenderData: every live blast's EffectTextures/ArcaneDisc discs
+/// in one additive mesh (viewer `sync_arcane_blasts`).
+#[allow(clippy::too_many_arguments)]
+fn arcane_blasts(
+    commands: &mut Commands,
+    (draw, disc): (&mut Option<(Entity, Handle<Mesh>)>, &mut Option<Option<Handle<Image>>>),
+    wizard: &p2magicka::WizardWorld,
+    session: &p2magicka::magicka_runtime::play_session::PlaySession,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    additive: &mut Assets<AdditiveMaterial>,
+    transforms: &mut Query<(&mut Transform, &mut Visibility)>,
+) {
+    let (mut positions, mut uvs, mut colors, mut indices) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for blast in &session.arcane_blasts {
+        for disc in blast.draws() {
+            let base = positions.len() as u32;
+            positions.extend(disc.positions);
+            uvs.extend(disc.uvs);
+            colors.extend([[1.0, 1.0, 1.0, disc.alpha]; 4]);
+            indices.extend([0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2].map(|k| base + k));
+        }
+    }
+    if positions.is_empty() {
+        if let Some((entity, _)) = &*draw {
+            if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+                *v = Visibility::Hidden;
+            }
+        }
+        return;
+    }
+    let mesh = additive_mesh(positions, uvs, colors, indices);
+    if let Some((entity, handle)) = &*draw {
+        if let Some(mut m) = meshes.get_mut(handle) {
+            *m = mesh;
+        }
+        if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+            *v = Visibility::Visible;
+        }
+        return;
+    }
+    let texture = disc
+        .get_or_insert_with(|| {
+            match p2magicka::visual::texture2d(&wizard.content, "EffectTextures/ArcaneDisc") {
+                Ok(t) => Some(images.add(Image::new(
+                    Extent3d { width: t.width, height: t.height, depth_or_array_layers: 1 },
+                    TextureDimension::D2,
+                    t.rgba,
+                    TextureFormat::Rgba8UnormSrgb,
+                    RenderAssetUsages::default(),
+                ))),
+                Err(error) => {
+                    eprintln!("MAGICKA arcane disc: {error}");
+                    None
+                }
+            }
+        })
+        .clone();
+    let handle = meshes.add(mesh);
+    let material = additive.add(AdditiveMaterial {
+        color: Vec4::ONE,
+        flags: UVec4::new(texture.is_some() as u32, 1, 0, 0),
+        texture,
+    });
+    let entity = commands
+        .spawn((
+            Mesh3d(handle.clone()),
+            MeshMaterial3d(material),
+            Transform::IDENTITY,
+            Visibility::Visible,
+            NotShadowCaster,
+            NoFrustumCulling,
+        ))
+        .id();
+    *draw = Some((entity, handle));
 }

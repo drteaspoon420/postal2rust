@@ -682,3 +682,20 @@ fn print_effect_model_bounds() {
         }
     }
 }
+#[test]
+fn arcane_area_cast_blasts_and_hurts_nearby_pawns() {
+    let mut w = world();
+    let handle = w.attach_pawn([150., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    frames(&mut w, PlayerInput::default(), 30);
+    element(&mut w, 5);
+    let area = PlayerInput { cast_down: true, shift_down: true, ..Default::default() };
+    let mut blasts = 0;
+    let mut events = Vec::new();
+    for i in 0..60 {
+        w.input(if i < 3 { area } else { PlayerInput::default() }, [500., 0., FLOOR + 60.], DT);
+        events.extend(w.step(DT).unwrap().into_iter().map(|e| format!("{e:?}").chars().take(80).collect::<String>()));
+        blasts = blasts.max(w.session.arcane_blasts.len());
+    }
+    let hp = w.session.world.npcs.get(&handle).map_or(0., |n| n.character.combat.health.hit_points);
+    assert!(blasts > 0 && hp < 1000., "arcane area: blasts={blasts} hp={hp} events={events:#?}");
+}

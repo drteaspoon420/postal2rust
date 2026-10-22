@@ -6,6 +6,7 @@ use p2magicka::{Loadout, PlayerInput, WizardWorld, magicka_runtime::avatar::Avat
 use p2magicka::persistence::SavedWizard;
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
+mod hud;
 mod wardrobe;
 
 // Default Wizard has 1000 HP; Postal's default player has 100. This host
@@ -24,7 +25,7 @@ impl Plugin for MagickaPlugin {
         })
         .add_plugins(crate::magicka_fx::MagickaFxPlugin)
         .add_systems(Startup, (hud_setup, wardrobe::setup, persistence_pending))
-        .add_systems(Update, wardrobe::draw.after(tick))
+        .add_systems(Update, (wardrobe::draw, hud::icons).after(tick))
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
             Update,
@@ -73,6 +74,8 @@ pub(crate) struct MagicState {
     recent_elements: (u32, f32),
     clock: f32,
     wardrobe: wardrobe::Wardrobe,
+    /// F8: full control help in the status panel.
+    help: bool,
 }
 impl MagicState {
     pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
@@ -109,17 +112,17 @@ fn hud_setup(mut commands: Commands) {
         MagicHud,
         Text::new("Magicka: waiting for player…"),
         TextFont {
-            font_size: bevy::text::FontSize::Px(17.),
+            font_size: bevy::text::FontSize::Px(13.),
             ..default()
         },
         TextColor(Color::srgb(0.95, 0.85, 0.55)),
         TextShadow::default(),
-        BackgroundColor(Color::srgba(0.02, 0.01, 0.05, 0.8)),
+        BackgroundColor(Color::srgba(0.02, 0.01, 0.05, 0.45)),
         Node {
             position_type: PositionType::Absolute,
-            bottom: px(16.),
-            left: px(16.),
-            padding: UiRect::all(px(10.)),
+            bottom: px(56.),
+            left: px(12.),
+            padding: UiRect::all(px(5.)),
             ..default()
         },
         GlobalZIndex(i32::MAX - 2),
@@ -277,6 +280,9 @@ pub(crate) fn tick(
     if !ui.game_look || ui.captured || sim.paused { return; }
     if keys.just_pressed(KeyCode::F6) {
         state.classic = !state.classic;
+    }
+    if keys.just_pressed(KeyCode::F8) {
+        state.help = !state.help;
     }
     let Some(wizard) = state.world.as_mut() else {
         return;
@@ -551,7 +557,7 @@ pub(crate) fn tick(
                     spell, cast_type, ..
                 } = event
                 {
-                    state.notices = format!("{:?}: {:?}", cast_type, spell.element);
+                    state.notices = format!("{:?}: {}", cast_type, spell_name(&spell));
                     state.recent_elements = (spell.element.0, state.clock);
                     println!("MAGICKA CAST {:?} {:?}", cast_type, spell);
                 }
@@ -734,14 +740,6 @@ pub(crate) fn tick(
         }
     }
     let health = &wizard.avatar().character.combat.health;
-    let queue = wizard
-        .avatar()
-        .conjure
-        .queue
-        .iter()
-        .map(|s| format!("{:?}", s.element))
-        .collect::<Vec<_>>()
-        .join(" · ");
     let gear = wizard
         .avatar()
         .items
@@ -749,26 +747,23 @@ pub(crate) fn tick(
         .map(|(_, i)| i.definition.name.as_str())
         .collect::<Vec<_>>()
         .join(" / ");
-    let controls = if state.classic {
-        "Q W E R / A S D F: Water Life Shield Cold / Lightning Arcane Earth Fire\nLMB move · Shift+LMB melee · RMB cast · Shift+RMB area · MMB self / staff · Space magick · F6 camera"
+    let controls = if !state.help {
+        "F8 controls | F7 loadout | F6 camera"
+    } else if state.classic {
+        "Q W E R / A S D F: Water Life Shield Cold / Lightning Arcane Earth Fire\nLMB move | Shift+LMB melee | RMB cast | Shift+RMB area | MMB self / staff | Space magick\nF6 camera | F7 loadout | F8 hide help"
     } else {
-        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move · LMB cast · Shift+LMB area · MMB self / staff · RMB melee · Q magick · F6 camera"
+        "1..8: Water Life Shield Cold Lightning Arcane Earth Fire\nWASD move | LMB cast | Shift+LMB area | MMB self / staff | RMB melee | Q magick\nF6 camera | F7 loadout | F8 hide help"
     };
     for mut text in &mut hud {
         **text = format!(
-            "{}  HP {:.0}/{:.0}  {}  · F7 loadout\n{}\n{}\n{}\n{}",
+            "{}  HP {:.0}/{:.0} | {}{}{}\n{}",
             wizard.loadout.robe,
             health.hit_points,
             health.max_hit_points,
-            if state.classic {
-                "Classic camera"
-            } else {
-                "First person"
-            },
             gear,
+            if state.notices.is_empty() { "" } else { "\n" },
+            state.notices,
             controls,
-            queue,
-            state.notices
         );
     }
     if let Err(error) = publish_wizard(wizard, state.classic, &mut sim.game) {
@@ -1015,6 +1010,25 @@ fn visuals(
             mesh.compute_smooth_normals();
         }
     }
+}
+
+/// "Arcane + Fire", or the magick's name.
+fn spell_name(spell: &p2magicka::magicka_sim::spells::Spell) -> String {
+    if spell.magick != p2magicka::magicka_sim::spells::MagickType::None {
+        return format!("{:?}", spell.magick);
+    }
+    const NAMES: [&str; 11] = [
+        "Earth", "Water", "Cold", "Fire", "Lightning", "Arcane", "Life", "Shield", "Ice", "Steam",
+        "Poison",
+    ];
+    let names: Vec<String> = spell
+        .mag
+        .iter()
+        .zip(NAMES)
+        .filter(|(m, _)| **m > 0.)
+        .map(|(m, n)| if *m > 1. { format!("{n}×{m:.0}") } else { n.to_string() })
+        .collect();
+    if names.is_empty() { "nothing".into() } else { names.join(" + ") }
 }
 
 /// Elements implied by a victim's statuses when no wizard spell is active.
