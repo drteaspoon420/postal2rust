@@ -1,5 +1,67 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Latest continuation: in-game loadouts (2026-10-22)
+
+Implemented `p2magicka::catalog::Catalog` and `WizardWorld::equip` on top of
+the existing rewrite's loadout API. The original install enumerates 41 robes,
+80 staffs and 159 melee weapons. Every listed robe was tested for original
+rig/geometry/pose loading, and every listed weapon/staff for model loading.
+Selection retains health fraction, combat statuses/wards and unchanged live
+items (cooldowns, enchantments, ammo). Invalid selections restore the old gear.
+The new robe owns its own base stats and resistances.
+
+F7 opens the keyboard loadout panel in either camera. Up/Down changes category,
+Left/Right cycles items, PgUp/PgDn skips ten, Home/End jumps, Enter equips and
+F7/Esc closes. The world keeps running. UI routing releases held native keys and
+suppresses typed/cast/look input while choosing. Original models rebuild when
+equipped names change. Map rebuilds now take the actual equipped loadout from
+the previous world instead of resetting to CLI defaults. Full wizard health,
+statuses, item state and save/load persistence remain unfinished.
+
+Verification: release build passed; 2 unit and 9 content integration tests
+passed (one bounds diagnostic ignored). `tools/magicka-loadout-smoke.sh` checks
+real input, gear replacement, resumed casting, camera switching and fresh
+screenshot saves; it rejects casting while the panel is open. Run with
+`P2GAME_SMOKE_OFFSCREEN=1` for software rendering without a display.
+The final run passed, and the equipped panel, changed first-person/classic
+models, and Escape returning to gameplay were visually inspected. The panel
+fits the 800x450 capture viewport. Artifacts: `out/magicka/loadout/`.
+The offscreen capture helper had used a
+thread-local image handle written by a Bevy startup worker and read on the VM
+thread; sharing it through a mutex fixed skipped screenshots.
+
+Next substantive work: wizard state in Postal save/load and travel; broad
+live spell/melee/staff behavior; magick world changes, summons and presentation
+in Postal. Current `magicka_fx.rs` bridges particles/beams/bolts/shields/missiles,
+but that alone does not establish full magick rendering or behavior.
+
+## Previous continuation: launch path (2026-10-22)
+
+The user reported a startup failure referencing the previous build machine's
+`/run/media/system/Cold_Storage/...` content directory. The adapter now discovers
+local Magicka content from the executable and CWD ancestors instead of using
+`CARGO_MANIFEST_DIR`. Explicit `--magicka-content` and `MAGICKA_CONTENT` still
+override discovery. See the launch examples in `MAGICKA-INTEGRATION.md`.
+
+Verified this continuation:
+
+- Release build passed (`CCACHE_DISABLE=1 cargo build --locked --offline --release -p p2game --bin p2game -j 2`).
+- Bridge tests passed: 2 unit tests (including checkout relocation/CWD discovery)
+  and 7 local-content integration tests. One diagnostic item-bounds test remains
+  intentionally ignored.
+- Started the rebuilt release from `/tmp`, with `MAGICKA_CONTENT` unset and no
+  `--magicka-content`. Offscreen runtime reports the hosted wizard, Postal
+  collision, six original robe/equipment mesh parts and an interactive frame.
+  Log: `/tmp/p2magicka-relocation-startup.log`.
+- Inspected existing first-person and classic screenshots under `out/magicka`.
+  The existing mayhem log records native bystander burning/fleeing/death. These
+  artifacts predate this continuation and do not prove full gameplay coverage.
+
+Preserved the pre-existing uncommitted damage/status and first-person equipment
+changes. In-game gear selection and map/save persistence remain unfinished;
+this continuation addressed the user's launch error before starting those.
+Older build/session and verification notes below are historical.
+
 ## Objective (keep full scope)
 
 Implement the Magicka rewrite's player, spell casting, staffs, melee weapons,

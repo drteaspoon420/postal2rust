@@ -81,8 +81,24 @@ pub(crate) fn ui_frame(
     let dt = time.delta_secs().clamp(0.0, 0.2);
     let mut events = p2input::bevy_map::collect_events(&keys, &mouse, motion.delta, scroll.delta.y, &[]);
     crate::magicka::filter_events(&mut events, capture.captured, magic.as_ref().is_some_and(|s| s.classic));
+    // The wizard loadout owns keyboard navigation. Release held native bindings
+    // as well, so opening it while walking cannot leave Postal moving forever.
+    let loadout_capture = !capture.captured && magic.as_ref().is_some_and(|s| {
+        s.loadout_open() || keys.just_pressed(KeyCode::F7)
+    });
+    if loadout_capture {
+        events.retain(|e| e.action == p2input::keys::Action::Release);
+        for key in keys.get_pressed().filter_map(|k| p2input::bevy_map::key_from_keycode(*k))
+            .chain(mouse.get_pressed().filter_map(|b| p2input::bevy_map::key_from_mouse(*b)))
+        {
+            events.push(p2input::bevy_map::InputEvent {
+                key, action: p2input::keys::Action::Release, delta: 0.,
+            });
+        }
+    }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let mut typed: Vec<char> = keys.get_just_pressed().filter_map(|k| keycode_char(*k, shift)).collect();
+    if loadout_capture { typed.clear(); }
     let mut mouse_pos = win.cursor_position().map(|p| (p.x, p.y));
     // Scripted test runs (P2GAME_EXEC/HOLD) ignore the OS keyboard and mouse: whatever window
     // has focus on the desktop would otherwise move, fire or even suicide the player. (P2GAME_REAL

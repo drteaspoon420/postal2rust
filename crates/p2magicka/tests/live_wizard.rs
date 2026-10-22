@@ -42,7 +42,10 @@ fn world() -> WizardWorld {
     for _ in 0..90 {
         w.step(DT).unwrap();
     }
-    assert!(!w.avatar().dead(), "the wizard must survive standing on a deep Postal floor");
+    assert!(
+        !w.avatar().dead(),
+        "the wizard must survive standing on a deep Postal floor"
+    );
     w
 }
 fn frames(w: &mut WizardWorld, input: PlayerInput, n: usize) {
@@ -110,15 +113,24 @@ fn self_life_cast_heals_and_haste_uses_rewrite_lifecycle() {
     for _ in 0..700 {
         w.step(DT).unwrap();
     }
-    assert!(!w.session.world.ability_effects.hasted(handle), "haste must expire");
+    assert!(
+        !w.session.world.ability_effects.hasted(handle),
+        "haste must expire"
+    );
 }
 #[test]
 fn arcane_beam_hits_a_hosted_postal_pawn() {
     let mut w = world();
-    let handle = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    let handle = w
+        .attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.)
+        .unwrap();
     // Leave the hosted pawn standing on Postal's floor before casting.
     frames(&mut w, PlayerInput::default(), 30);
-    let before = w.session.world.npcs[&handle].character.combat.health.hit_points;
+    let before = w.session.world.npcs[&handle]
+        .character
+        .combat
+        .health
+        .hit_points;
     element(&mut w, 5);
     frames(
         &mut w,
@@ -129,8 +141,31 @@ fn arcane_beam_hits_a_hosted_postal_pawn() {
         120,
     );
     assert!(
-        w.session.world.npcs[&handle].character.combat.health.hit_points < before,
+        w.session.world.npcs[&handle]
+            .character
+            .combat
+            .health
+            .hit_points
+            < before,
         "real Magicka beam must damage the mirrored Postal character"
+    );
+}
+#[test]
+fn hosted_pawn_keeps_its_postal_health() {
+    let mut w = world();
+    // Postal health above the Wizard template's 1000 must not be clamped,
+    // or every hosted Postal character would be hurt on attach.
+    let handle = w
+        .attach_pawn([200., 0., FLOOR + 60.], 1250., 24., 40.)
+        .unwrap();
+    frames(&mut w, PlayerInput::default(), 30);
+    assert_eq!(
+        w.session.world.npcs[&handle]
+            .character
+            .combat
+            .health
+            .hit_points,
+        1250.
     );
 }
 #[test]
@@ -195,6 +230,157 @@ fn incoming_host_damage_uses_magicka_health_and_self_shield() {
         "incoming host damage must wear down the ward"
     );
 }
+
+#[test]
+fn loadout_catalog_and_equipping_preserve_live_combat_and_existing_items() {
+    use p2magicka::{
+        catalog::Catalog,
+        magicka_sim::status::{Status, StatusEffect},
+    };
+    let mut w = world();
+    let catalog = Catalog::load(&w.content).unwrap();
+    assert!(catalog.robes.iter().any(|s| s == "Wizard"));
+    assert!(catalog.staffs.iter().any(|s| s == "staff_basic"));
+    assert!(catalog.weapons.iter().any(|s| s == "weapon_blunt_blade"));
+    let before = w.equipped_loadout();
+    let replacement = catalog
+        .weapons
+        .iter()
+        .find(|name| Some(*name) != before.weapon.as_ref())
+        .unwrap();
+    w.avatar_mut().character.combat.health.hit_points *= 0.4;
+    let health = w.avatar().character.combat.health.hit_points;
+    w.avatar_mut()
+        .character
+        .combat
+        .statuses
+        .set_effect(StatusEffect::new(Status::Wet, 0., 1., false))
+        .unwrap();
+    w.avatar_mut().character.combat.statuses.current_mask = Status::Wet as u16;
+    w.avatar_mut()
+        .items
+        .iter_mut()
+        .find(|(slot, _)| *slot == 1)
+        .unwrap()
+        .1
+        .special_cooldown = 7.;
+    w.equip(Loadout {
+        weapon: Some(replacement.clone()),
+        ..before.clone()
+    })
+    .unwrap();
+    assert_eq!(
+        w.avatar().character.combat.health.hit_points,
+        health,
+        "equipping must not heal"
+    );
+    assert!(w.avatar().character.combat.statuses.has(Status::Wet));
+    assert_eq!(
+        w.avatar()
+            .items
+            .iter()
+            .find(|(slot, _)| *slot == 1)
+            .unwrap()
+            .1
+            .special_cooldown,
+        7.
+    );
+    assert_eq!(w.equipped_loadout().weapon.as_ref(), Some(replacement));
+    assert_eq!(w.loadout, w.equipped_loadout());
+    let parts = p2magicka::visual::load(&w).unwrap();
+    assert!(
+        parts.iter().any(|p| p.slot == Some(0)),
+        "replacement model is renderable"
+    );
+
+    let robe = catalog
+        .robes
+        .iter()
+        .find(|name| **name != before.robe)
+        .unwrap();
+    let selected = Loadout {
+        robe: robe.clone(),
+        ..w.equipped_loadout()
+    };
+    w.equip(selected.clone()).unwrap();
+    let hp = &w.avatar().character.combat.health;
+    assert!((hp.hit_points / hp.max_hit_points - 0.4).abs() < 1e-5);
+    let health_before_invalid = hp.hit_points;
+    assert_eq!(w.session.player_robe(0), Some(robe.as_str()));
+    assert!(w.avatar().rig.is_some());
+    assert!(
+        p2magicka::visual::load(&w)
+            .unwrap()
+            .iter()
+            .any(|p| p.slot.is_none())
+    );
+    assert!(w.avatar().character.combat.statuses.has(Status::Wet));
+    let mut invalid = selected;
+    invalid.staff = Some("not-an-installed-staff".into());
+    let expected = w.equipped_loadout();
+    assert!(w.equip(invalid).is_err());
+    assert_eq!(
+        w.equipped_loadout(),
+        expected,
+        "failed selection must leave gear intact"
+    );
+    assert_eq!(
+        w.avatar().character.combat.health.hit_points,
+        health_before_invalid
+    );
+}
+#[test]
+fn installed_catalog_loads_original_robes_staffs_and_melee_models() {
+    let mut w = world();
+    let catalog = p2magicka::catalog::Catalog::load(&w.content).unwrap();
+    eprintln!(
+        "loadout catalog: {} robes, {} staffs, {} melee weapons",
+        catalog.robes.len(),
+        catalog.staffs.len(),
+        catalog.weapons.len()
+    );
+    for robe in &catalog.robes {
+        w.equip(Loadout {
+            robe: robe.clone(),
+            ..w.equipped_loadout()
+        })
+        .unwrap_or_else(|e| panic!("{robe}: {e}"));
+        assert!(w.avatar().rig.is_some(), "{robe}: original skeleton");
+        let parts = p2magicka::visual::load(&w).unwrap_or_else(|e| panic!("{robe}: {e}"));
+        assert!(
+            parts.iter().any(|p| p.slot.is_none()),
+            "{robe}: original robe geometry"
+        );
+        assert!(
+            p2magicka::visual::pose(&w).is_some(),
+            "{robe}: pose sampling"
+        );
+    }
+    w.equip(Loadout {
+        robe: "Wizard".into(),
+        ..w.equipped_loadout()
+    })
+    .unwrap();
+    for (slot, names) in [(1, &catalog.staffs), (0, &catalog.weapons)] {
+        for name in names {
+            let mut gear = w.equipped_loadout();
+            if slot == 1 {
+                gear.staff = Some(name.clone());
+            } else {
+                gear.weapon = Some(name.clone());
+            }
+            w.equip(gear).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let item = &w.avatar().items.iter().find(|(s, _)| *s == slot).unwrap().1;
+            let hidden = item.definition.hide_model;
+            let parts = p2magicka::visual::load(&w).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                hidden || parts.iter().any(|p| p.slot == Some(slot)),
+                "{name}: original equipment geometry"
+            );
+        }
+    }
+}
+
 #[test]
 fn particle_sprite_sheets_decode_with_content() {
     let content = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -207,6 +393,28 @@ fn particle_sprite_sheets_decode_with_content() {
         assert!(
             v.rgba[..base].chunks_exact(4).any(|c| c[3] == 255),
             "sprites have opaque texels"
+        );
+    }
+}
+#[test]
+#[ignore]
+fn print_item_bounds() {
+    let w = world();
+    for p in p2magicka::visual::load(&w).unwrap() {
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for v in &p.geometry.positions {
+            for i in 0..3 {
+                min[i] = min[i].min(v[i]);
+                max[i] = max[i].max(v[i]);
+            }
+        }
+        eprintln!(
+            "slot {:?} verts {} min {:?} max {:?}",
+            p.slot,
+            p.geometry.positions.len(),
+            min,
+            max
         );
     }
 }

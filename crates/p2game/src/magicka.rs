@@ -5,6 +5,7 @@ use bevy::{input::mouse::AccumulatedMouseScroll, prelude::*};
 use p2magicka::{Loadout, PlayerInput, WizardWorld, magicka_runtime::avatar::AvatarEvent};
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
+mod wardrobe;
 
 // Default Wizard has 1000 HP; Postal's default player has 100. This host
 // conversion keeps a gunshot's relative strength while retaining robe stats.
@@ -21,7 +22,8 @@ impl Plugin for MagickaPlugin {
             ..default()
         })
         .add_plugins(crate::magicka_fx::MagickaFxPlugin)
-        .add_systems(Startup, hud_setup)
+        .add_systems(Startup, (hud_setup, wardrobe::setup))
+        .add_systems(Update, wardrobe::draw.after(tick))
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
             Update,
@@ -36,13 +38,18 @@ pub(crate) fn enabled() -> bool {
 fn option(name: &str) -> Option<String> {
     std::env::args().skip_while(|a| a != name).nth(1)
 }
-fn content_dir() -> PathBuf {
+fn content_dir() -> Result<PathBuf, String> {
     option("--magicka-content")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("MAGICKA_CONTENT").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../re-lab-starter/target/Magicka/Content")
+        .or_else(|| {
+            p2magicka::discover_content(
+                &std::env::current_exe().ok()?,
+                &std::env::current_dir().ok()?,
+            )
+        })
+        .ok_or_else(|| {
+            "Magicka content was not found beside the project. Use --magicka-content /path/to/Magicka/Content or set MAGICKA_CONTENT.".into()
         })
 }
 #[derive(Default)]
@@ -57,11 +64,23 @@ pub(crate) struct MagicState {
     pub(crate) classic: bool,
     pub aim: Vec3,
     pub notices: String,
+    /// Elements of the wizard's latest spell and when it was last active, so
+    /// Postal hears which kind of damage a victim took.
+    recent_elements: (u32, f32),
+    clock: f32,
+    wardrobe: wardrobe::Wardrobe,
+}
+impl MagicState {
+    pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
 }
 struct Mirror {
     handle: u16,
     health: f32,
     remainder: f32,
+    /// Native Postal reactions already started for the current Magicka status.
+    burning: bool,
+    frozen_speed: Option<f32>,
+    gibbed: bool,
 }
 #[derive(Component)]
 pub(crate) struct MagicHud;
@@ -152,11 +171,11 @@ pub(crate) fn tick(
             if let Some(bounds) = collision.bounds() {
                 collision.for_tris_in(&bounds, |t| tris.push(t.map(|p| p.to_array())));
             }
-            let loadout = Loadout {
+            let loadout = state.world.as_ref().map(WizardWorld::equipped_loadout).unwrap_or_else(|| Loadout {
                 robe: option("--robe").unwrap_or_else(|| "Wizard".into()),
                 staff: option("--staff"),
                 weapon: option("--melee"),
-            };
+            });
             let vm = &sim.game.world.vm;
             let position = vm.actor_loc(pawn);
             let yaw = vm
@@ -165,13 +184,15 @@ pub(crate) fn tick(
                 .unwrap_or_default()[1] as f32
                 * std::f32::consts::TAU
                 / 65536.;
-            match WizardWorld::new(
-                &content_dir(),
-                p2magicka::postal_level(tris),
-                loadout,
-                position,
-                [yaw.cos(), yaw.sin(), 0.],
-            ) {
+            match content_dir().and_then(|content| {
+                WizardWorld::new(
+                    &content,
+                    p2magicka::postal_level(tris),
+                    loadout,
+                    position,
+                    [yaw.cos(), yaw.sin(), 0.],
+                )
+            }) {
                 Ok(world) => {
                     println!(
                         "MAGICKA: hosted wizard and Postal collision for {}",
@@ -295,12 +316,41 @@ pub(crate) fn tick(
                                 handle,
                                 health: hp,
                                 remainder: 0.,
+                                burning: false,
+                                frozen_speed: None,
+                                gibbed: false,
                             },
                         );
                     }
                     Err(error) => {
                         eprintln!("MAGICKA pawn: {error}");
                         continue;
+                    }
+                }
+            }
+            if let Ok(words) = std::env::var("MAGICKA_DUMP_FN") {
+                if state.mirrors.len() == 1 {
+                    let mut c = Some(vm.objects[actor].class);
+                    while let Some(ci) = c {
+                        let f = vm.classes[ci].field;
+                        let sp = vm.pkgs[f.pkg as usize].clone();
+                        let names: Vec<String> = sp
+                            .children(f.export as usize)
+                            .into_iter()
+                            .filter(|&k| matches!(sp.objects[k], Some(uscript::ScriptObject::Function(_))))
+                            .map(|k| sp.export_name(k).to_string())
+                            .filter(|n| words.split(',').any(|w| n.to_ascii_lowercase().contains(w)))
+                            .collect();
+                        println!("MAGICKA FN {}: {}", vm.classes[ci].name, names.join(" "));
+                        if vm.classes[ci].super_.is_none() {
+                            let damage = vm.find_class("Engine", "DamageType").ok();
+                            let all: Vec<String> = (0..vm.classes.len())
+                                .filter(|&k| damage.is_some_and(|d| vm.is_child_of(k, d)))
+                                .map(|k| format!("{}.{}", vm.classes[k].package, vm.classes[k].name))
+                                .collect();
+                            println!("MAGICKA DAMAGETYPES {}", all.join(" "));
+                        }
+                        c = vm.classes[ci].super_;
                     }
                 }
             }
@@ -370,6 +420,7 @@ pub(crate) fn tick(
         }
     }
     let dt = time.delta_secs().clamp(0., 0.05);
+    state.wardrobe.update(wizard, &keys);
     let element_keys = if state.classic {
         [
             KeyCode::KeyQ,
@@ -393,7 +444,7 @@ pub(crate) fn tick(
             KeyCode::Digit8,
         ]
     };
-    let input = PlayerInput {
+    let mut input = PlayerInput {
         // First-person retains WASD; numbers are the same ordered eight
         // elements as classic Q W E R A S D F.
         elements: element_keys.map(|k| keys.pressed(k)),
@@ -416,7 +467,26 @@ pub(crate) fn tick(
         magick_next: scroll.delta.y < 0.,
         ..default()
     };
+    if state.wardrobe.open {
+        input = PlayerInput {
+            pad_movement: Some([0., 0.]),
+            ..default()
+        };
+    }
     wizard.input(input, aim.to_array(), dt);
+    state.clock += dt;
+    if let Some((_, spell)) = wizard.avatar().casting_spell() {
+        state.recent_elements = (spell.element.0, state.clock);
+    }
+    // Pushes, levitation and knockback of the hosted characters this step.
+    let velocities_before: HashMap<u16, [f32; 3]> = state
+        .mirrors
+        .values()
+        .filter_map(|m| {
+            let npc = wizard.session.world.npcs.get(&m.handle)?;
+            Some((m.handle, wizard.session.world.physics.bodies[npc.body].position))
+        })
+        .collect();
     match wizard.step(dt) {
         Ok(events) => {
             for event in events {
@@ -425,6 +495,7 @@ pub(crate) fn tick(
                 } = event
                 {
                     state.notices = format!("{:?}: {:?}", cast_type, spell.element);
+                    state.recent_elements = (spell.element.0, state.clock);
                     println!("MAGICKA CAST {:?} {:?}", cast_type, spell);
                 }
             }
@@ -490,18 +561,48 @@ pub(crate) fn tick(
             Value::Vector((Vec3::from(position) + delta).to_array()),
         );
     }
-    let damage_type = Value::Class(vm.find_class("Engine", "DamageType").ok());
+    let melee = matches!(
+        wizard.avatar().motion.state,
+        p2magicka::magicka_runtime::character_motion::CharacterState::Attack
+    );
+    let spell_elements = if state.clock - state.recent_elements.1 < 1.5 {
+        state.recent_elements.0
+    } else {
+        0
+    };
     for (&actor, mirror) in &mut state.mirrors {
         if vm.objects.get(actor).is_none_or(|o| o.deleted) {
             continue;
         }
-        let Some(npc) = wizard.session.world.npcs.get(&mirror.handle) else {
-            continue;
-        };
-        let new_health = npc.character.combat.health.hit_points / HEALTH_SCALE;
+        let npc = wizard.session.world.npcs.get(&mirror.handle);
+        // A character the rewrite removed on death (overkill, disintegration)
+        // takes its remaining health in one hit.
+        let new_health = npc.map_or(-1000., |n| n.character.combat.health.hit_points / HEALTH_SCALE);
+        let statuses = npc.map(|n| n.character.combat.statuses.current_mask).unwrap_or(0);
+        let overkilled = npc.is_none_or(|n| n.character.combat.overkilled);
+        let displacement = npc.and_then(|n| {
+            let now = wizard.session.world.physics.bodies[n.body].position;
+            let before = velocities_before.get(&mirror.handle)?;
+            Some(Vec3::from(now) - Vec3::from(*before))
+        });
         let damage = mirror.health - new_health + mirror.remainder;
+        if std::env::var_os("MAGICKA_TRACE").is_some() && (statuses != 0 || damage.abs() > 0.01) {
+            println!(
+                "MAGICKA MIRROR {} postal={} magicka={new_health} statuses={statuses:#x} present={}",
+                vm.object_name(actor),
+                mirror.health,
+                npc.is_some()
+            );
+        }
+        let alive = vm.get_prop(actor, "Health").map(Value::as_float).unwrap_or(0.) > 0.;
         if damage >= 1. {
             let amount = damage.floor() as i32;
+            let elements = if spell_elements != 0 { spell_elements } else { status_elements(statuses) };
+            let class = postal_damage_class(vm, elements, melee, amount);
+            // Magicka pushes become Postal momentum (kg·uu/s on a ~100 kg pawn).
+            let momentum = displacement
+                .map(|d| Vec3::from(p2magicka::to_postal(d.to_array())) / dt.max(1e-3) * 100.)
+                .unwrap_or(Vec3::ZERO);
             vm.fire_event(
                 actor,
                 "TakeDamage",
@@ -509,10 +610,17 @@ pub(crate) fn tick(
                     Value::Int(amount),
                     Value::Object(Some(pawn)),
                     Value::Vector(vm.actor_loc(actor)),
-                    Value::Vector([0.; 3]),
-                    damage_type.clone(),
+                    Value::Vector(momentum.to_array()),
+                    Value::Class(class),
                 ],
             );
+            if std::env::var_os("MAGICKA_TRACE").is_some() {
+                println!(
+                    "MAGICKA HIT {} {amount} {} statuses={statuses:#x} momentum={momentum:?}",
+                    vm.object_name(actor),
+                    class.map(|c| vm.classes[c].name.as_str()).unwrap_or("?")
+                );
+            }
             mirror.remainder = damage - amount as f32;
         } else if damage <= -1. {
             vm.set_prop(actor, "Health", Value::Int(new_health as i32));
@@ -520,10 +628,48 @@ pub(crate) fn tick(
         } else {
             mirror.remainder = damage;
         }
-        mirror.health = vm
-            .get_prop(actor, "Health")
-            .map(Value::as_float)
-            .unwrap_or(0.);
+        let health_now = vm.get_prop(actor, "Health").map(Value::as_float).unwrap_or(0.);
+        // Overkill (frozen shatter, huge blasts) gibs the Postal body too.
+        if overkilled && !mirror.gibbed && (alive || damage >= 1.) && health_now <= 0. {
+            mirror.gibbed = true;
+            vm.fire_event(actor, "ChunkUp", vec![Value::Int(damage.max(100.) as i32)]);
+            println!("MAGICKA overkill gibbed {}", vm.object_name(actor));
+        }
+        if health_now > 0. {
+            use p2magicka::magicka_sim::status::Status as S;
+            let has = |s: S| statuses & s as u16 != 0;
+            if has(S::Burning) && !mirror.burning {
+                mirror.burning = true;
+                vm.fire_event(actor, "SetOnFire", vec![Value::Object(Some(pawn)), Value::Bool(false)]);
+            } else if !has(S::Burning) && mirror.burning {
+                mirror.burning = false;
+                if has(S::Wet) {
+                    let extinguish = vm.find_class("BaseFX", "ExtinguishDamage").ok();
+                    vm.fire_event(
+                        actor,
+                        "TakeDamage",
+                        vec![
+                            Value::Int(0),
+                            Value::Object(Some(pawn)),
+                            Value::Vector(vm.actor_loc(actor)),
+                            Value::Vector([0.; 3]),
+                            Value::Class(extinguish),
+                        ],
+                    );
+                }
+            }
+            // Frozen solid: no walking until the ice thaws or shatters.
+            if has(S::Frozen) && mirror.frozen_speed.is_none() {
+                mirror.frozen_speed = vm.get_prop(actor, "GroundSpeed").map(Value::as_float);
+                vm.set_prop(actor, "GroundSpeed", Value::Float(0.));
+                vm.set_prop(actor, "Velocity", Value::Vector([0.; 3]));
+            } else if !has(S::Frozen) {
+                if let Some(speed) = mirror.frozen_speed.take() {
+                    vm.set_prop(actor, "GroundSpeed", Value::Float(speed));
+                }
+            }
+        }
+        mirror.health = health_now;
         // The native TakeDamage may apply armour or script immunity. Keep
         // subsequent damage deltas relative to that actual result.
         if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
@@ -553,7 +699,7 @@ pub(crate) fn tick(
     };
     for mut text in &mut hud {
         **text = format!(
-            "{}  HP {:.0}/{:.0}  {}\n{}\n{}\n{}\n{}",
+            "{}  HP {:.0}/{:.0}  {}  · F7 loadout\n{}\n{}\n{}\n{}",
             wizard.loadout.robe,
             health.hit_points,
             health.max_hit_points,
@@ -601,8 +747,15 @@ pub(crate) fn camera(
 }
 
 #[derive(Default)]
+struct FirstPersonHands {
+    state: Option<p2magicka::magicka_runtime::character_motion::CharacterState>,
+    since: f32,
+    walk: f32,
+}
+#[derive(Default)]
 struct WizardDraws {
     map: String,
+    loadout: Option<Loadout>,
     parts: Vec<(p2magicka::visual::Part, Entity, Handle<Mesh>)>,
 }
 fn visuals(
@@ -615,13 +768,17 @@ fn visuals(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut visibility: Query<&mut Visibility>,
+    time: Res<Time>,
+    mut fp: Local<FirstPersonHands>,
 ) {
     let Some(wizard) = &state.world else { return };
-    if draws.map != state.map {
+    let loadout = wizard.equipped_loadout();
+    if draws.map != state.map || draws.loadout.as_ref() != Some(&loadout) {
         for (_, entity, _) in draws.parts.drain(..) {
             commands.entity(entity).despawn();
         }
         draws.map.clone_from(&state.map);
+        draws.loadout = Some(loadout);
         match p2magicka::visual::load(wizard) {
             Ok(parts) => {
                 println!(
@@ -693,6 +850,76 @@ fn visuals(
         let aim = p2view::scene::to_bevy(state.aim.to_array());
         Some((eye, (aim - eye).normalize_or(Vec3::NEG_Z)))
     });
+    // First person: the staff (right hand) and melee weapon (left hand) are
+    // held in view instead of following the third-person animation, with the
+    // cast thrust, charge tremble and melee swing driven by the avatar state.
+    let motion_state = wizard.avatar().motion.state;
+    if Some(motion_state) != fp.state {
+        fp.state = Some(motion_state);
+        fp.since = time.elapsed_secs();
+    }
+    let t = time.elapsed_secs();
+    let phase = t - fp.since;
+    let walking = sim
+        .game
+        .player_controller
+        .and_then(|pc| sim.game.world.vm.get_prop(pc, "Pawn")?.as_obj())
+        .and_then(|pawn| sim.game.world.vm.get_prop(pawn, "Velocity"))
+        .map(|v| Vec3::from(v.as_vec()).truncate().length() > 20.)
+        .unwrap_or(false);
+    fp.walk = (fp.walk + if walking { 1. } else { -1. } * time.delta_secs() * 4.).clamp(0., 1.);
+    let held = eye_and_forward.map(|(eye, forward)| {
+        use p2magicka::magicka_runtime::character_motion::CharacterState as S;
+        let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
+        let up = right.cross(forward);
+        let bob = up * (t * 9.).sin() * 0.012 * fp.walk + right * (t * 4.5).cos() * 0.01 * fp.walk;
+        let ease = |d: f32| (phase / d).clamp(0., 1.);
+        let (cast, charge, attack, boost) = (
+            matches!(motion_state, S::Cast),
+            matches!(motion_state, S::Charge),
+            matches!(motion_state, S::Attack),
+            matches!(motion_state, S::Boost),
+        );
+        move |slot: i32| -> (Vec3, Vec3, Vec3, Vec3) {
+            let (mut grip, mut axis, scale) = if slot == 1 {
+                (
+                    eye + forward * 0.62 + right * 0.3 - up * 0.42,
+                    (up * 0.85 + forward * 0.4 - right * 0.12).normalize(),
+                    0.42,
+                )
+            } else {
+                (
+                    eye + forward * 0.5 - right * 0.34 - up * 0.42,
+                    (up * 0.55 + forward * 0.75 + right * 0.2).normalize(),
+                    0.55,
+                )
+            };
+            grip += bob;
+            if slot == 1 && (cast || charge || boost) {
+                let k = ease(0.12);
+                grip += forward * 0.14 * k - right * 0.06 * k + up * 0.05 * k;
+                axis = axis.lerp((forward * 0.75 + up * 0.65).normalize(), k).normalize();
+                if charge {
+                    grip += (right * (t * 47.).sin() + up * (t * 39.).cos()) * 0.006;
+                }
+                if boost {
+                    grip += up * 0.08 * k;
+                }
+            }
+            if slot == 0 && attack {
+                // A right-to-left slash: the blade sweeps across the view.
+                let k = ease(0.35);
+                let angle = 1.1 - 2.6 * k;
+                let swing = Quat::from_axis_angle(forward, angle)
+                    * Quat::from_axis_angle(up, -0.6 * k);
+                axis = (swing * (up * 0.3 + forward * 0.9)).normalize();
+                grip += right * 0.3 * (k * std::f32::consts::PI).sin() + forward * 0.08;
+            }
+            let z = (forward - axis * forward.dot(axis)).normalize_or(-right);
+            let x = axis.cross(z);
+            (grip, x * scale, axis * scale, z * scale)
+        }
+    });
     for (part, entity, handle) in &draws.parts {
         if let Ok(mut v) = visibility.get_mut(*entity) {
             *v = if ui.player_view && (state.classic || part.slot.is_some()) {
@@ -701,26 +928,79 @@ fn visuals(
                 Visibility::Hidden
             };
         }
-        let mut positions = p2magicka::visual::positions(part, &skin, &items);
-        if !state.classic {
-            if let (Some(slot), Some((eye, forward))) = (part.slot, eye_and_forward) {
-                if let Some((_, transform)) = items.iter().find(|(s, _)| *s == slot) {
-                    let origin = Vec3::new(transform[12], transform[13], transform[14]);
-                    let right = forward.cross(Vec3::Y).normalize_or(Vec3::X);
-                    let destination =
-                        eye + forward * 0.61 + right * if slot == 1 { -0.34 } else { 0.34 }
-                            - Vec3::Y * 0.53;
-                    let offset = destination - origin;
-                    for p in &mut positions {
-                        *p = (Vec3::from(*p) + offset).to_array();
-                    }
-                }
+        let positions = match (state.classic, part.slot, &held) {
+            (false, Some(slot), Some(held)) => {
+                let (origin, x, y, z) = held(slot);
+                part.geometry
+                    .positions
+                    .iter()
+                    .map(|p| (origin + x * p[0] + y * p[1] + z * p[2]).to_array())
+                    .collect()
             }
-        }
+            _ => p2magicka::visual::positions(part, &skin, &items),
+        };
         if let Some(mut mesh) = meshes.get_mut(handle) {
             mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
             mesh.compute_smooth_normals();
         }
+    }
+}
+
+/// Elements implied by a victim's statuses when no wizard spell is active.
+fn status_elements(mask: u16) -> u32 {
+    use p2magicka::magicka_sim::{spells::Elements as E, status::Status as S};
+    let mut e = 0;
+    for (status, element) in [
+        (S::Burning, E::FIRE),
+        (S::Wet, E::WATER),
+        (S::Frozen, E::COLD),
+        (S::Cold, E::COLD),
+        (S::Poisoned, E::POISON),
+        (S::Steamed, E::STEAM),
+    ] {
+        if mask & status as u16 != 0 {
+            e |= element.0;
+        }
+    }
+    e
+}
+
+/// The Postal damage class whose native reactions match a Magicka hit:
+/// burning, shocked dancing, anthrax coughing, exploding into gibs.
+fn postal_damage_class(
+    vm: &mut uscript::vm::Vm,
+    elements: u32,
+    melee: bool,
+    amount: i32,
+) -> Option<uscript::vm::ClassId> {
+    use p2magicka::magicka_sim::spells::Elements as E;
+    let has = |e: E| elements & e.0 != 0;
+    let name = if melee && elements == 0 {
+        "CuttingDamage"
+    } else if has(E::LIGHTNING) {
+        "ElectricalDamage"
+    } else if has(E::FIRE) || has(E::STEAM) {
+        "BurnedDamage"
+    } else if has(E::POISON) {
+        "AnthDamage"
+    } else if has(E::ARCANE) && amount >= 40 {
+        "ExplodedDamage"
+    } else if has(E::ARCANE) {
+        "BloodMakingDamage"
+    } else if has(E::ICE) {
+        "CuttingDamage"
+    } else if has(E::EARTH) {
+        "SmashDamage"
+    } else if has(E::WATER) || has(E::COLD) {
+        "BludgeonDamage"
+    } else if melee {
+        "CuttingDamage"
+    } else {
+        "BodyDamage"
+    };
+    match vm.find_class("BaseFX", name) {
+        Ok(class) => Some(class),
+        Err(_) => vm.find_class("Engine", "DamageType").ok(),
     }
 }
 

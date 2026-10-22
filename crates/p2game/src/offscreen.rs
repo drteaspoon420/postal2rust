@@ -6,8 +6,10 @@ use bevy::{
     prelude::*,
     render::view::screenshot::Screenshot,
 };
-use std::{cell::RefCell, time::Duration};
-thread_local! { static CAPTURE: RefCell<Option<Handle<Image>>> = const { RefCell::new(None) }; }
+use std::{sync::Mutex, time::Duration};
+// Startup can run on a Bevy worker, while screenshot requests run on the main
+// thread with the VM. Both must see the same image target.
+static CAPTURE: Mutex<Option<Handle<Image>>> = Mutex::new(None);
 #[derive(Resource)]
 struct Output(Handle<Image>);
 
@@ -36,7 +38,7 @@ fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     );
     image.texture_descriptor.usage |= bevy::render::render_resource::TextureUsages::COPY_SRC;
     let image = images.add(image);
-    CAPTURE.with(|c| *c.borrow_mut() = Some(image.clone()));
+    *CAPTURE.lock().unwrap() = Some(image.clone());
     commands.insert_resource(Output(image));
     println!("OFFSCREEN: normal game renderer targeting 800x450 image");
 }
@@ -48,9 +50,9 @@ fn retarget(output: Res<Output>, mut targets: Query<&mut RenderTarget, With<Came
     }
 }
 pub(crate) fn screenshot() -> Screenshot {
-    CAPTURE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map_or_else(Screenshot::primary_window, |h| Screenshot::image(h.clone()))
-    })
+    CAPTURE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map_or_else(Screenshot::primary_window, |h| Screenshot::image(h.clone()))
 }

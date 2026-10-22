@@ -1,6 +1,7 @@
 //! Adapts the existing Magicka rewrite to Postal 2. Game rules remain in
 //! magicka-runtime; this crate owns coordinates, content and host integration.
 pub mod visual;
+pub mod catalog;
 
 pub use magicka_content;
 use magicka_content::level::{LevelModel, NavMesh, TriMesh};
@@ -15,6 +16,32 @@ use magicka_runtime::{
 pub use magicka_sim;
 use magicka_sim::character_physics::{CharacterBody, Orientation};
 use std::path::{Path, PathBuf};
+
+/// Find user-owned content relative to the running game or working directory.
+/// Do not bake the build machine's workspace path into a portable executable.
+pub fn discover_content(executable: &Path, working_directory: &Path) -> Option<PathBuf> {
+    for anchor in executable.parent().into_iter().chain([working_directory]) {
+        for directory in anchor.ancestors() {
+            for relative in [
+                "re-lab-starter/target/Magicka/Content",
+                "target/Magicka/Content",
+                "Magicka/Content",
+                "Content",
+            ] {
+                let candidate = directory.join(relative);
+                if magicka_runtime::play_content::resolve(
+                    &candidate,
+                    Path::new("Data/Characters/Wizard.xnb"),
+                )
+                .is_some_and(|p| p.is_file())
+                {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
 
 /// Host convention: 52.5 Unreal units per metre (Postal renderer convention). Axis exchange reverses
 /// handedness, so collision triangle winding must also be reversed.
@@ -61,7 +88,7 @@ pub fn postal_level(triangles: impl IntoIterator<Item = [[f32; 3]; 3]>) -> Level
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Loadout {
     pub robe: String,
     pub staff: Option<String>,
@@ -217,6 +244,9 @@ impl WizardWorld {
         let npc = world.npcs.get_mut(&handle).unwrap();
         npc.weapons.clear();
         npc.character.definition.faction = 2;
+        // Character.Update resets the maximum from the definition each step;
+        // the Postal pawn's own health is the template here.
+        npc.character.definition.max_hit_points = health;
         npc.character.combat.health.hit_points = health;
         npc.character.combat.health.max_hit_points = health;
         let body = &mut world.physics.bodies[npc.body];
@@ -272,6 +302,30 @@ impl WizardWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn content_discovery_survives_relocation_and_unrelated_working_directory() {
+        let root = std::env::temp_dir().join(format!("p2magicka-discovery-{}", std::process::id()));
+        let content = root.join("moved workspace/re-lab-starter/target/Magicka/Content");
+        let wizard = content.join("data/characters/Wizard.xnb");
+        std::fs::create_dir_all(wizard.parent().unwrap()).unwrap();
+        std::fs::write(&wizard, []).unwrap();
+        let executable = root.join("moved workspace/postal2rust/target/release/p2game");
+        let unrelated = root.join("elsewhere");
+        assert_eq!(
+            discover_content(&executable, &unrelated),
+            Some(content.clone())
+        );
+        // A copied standalone binary can also use a checkout beside the CWD.
+        assert_eq!(
+            discover_content(
+                &unrelated.join("p2game"),
+                &root.join("moved workspace/postal2rust")
+            ),
+            Some(content),
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(discover_content(&executable, &unrelated), None);
+    }
     #[test]
     fn coordinates_roundtrip_and_reverse_triangle_winding() {
         let p = [100., -200., 300.];
