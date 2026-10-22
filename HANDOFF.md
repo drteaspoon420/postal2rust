@@ -1,5 +1,38 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Session 2026-10-22 (b): projectiles, walls, mines, shields, beams, HUD
+
+The Magicka workspace moved to `../rust-bevy-magicka` (new history; the old
+`re-lab-starter` host hooks were lost). Added to the rewrite, committed on its
+local `main`: `PlaySession::hosted` (script-less scene on host geometry) and
+`SceneWorld::missile_kill_height` (MissileEntity's fixed Y -50 removal; hosted
+scenes use their kill plane). Postal maps sit near Y -82 m, so every
+projectile died on spawn before this.
+
+Fixed in postal2rust (user-reported):
+- Earth/ice projectiles launch and hit (tests `earth_force_cast_launches_a_missile`,
+  `earth_and_ice_projectiles_hit_a_hosted_pawn`).
+- First person: spells leave the visible staff orb toward the crosshair
+  (`WizardWorld::set_staff_orb` before the step; casts read the orb before
+  the rig re-poses it).
+- Steam maps to BludgeonDamage instead of BurnedDamage (no ignition).
+- Earth/ice walls and mines: original skinned models (`visual::skinned_effect`)
+  with emerge clips sampled at sim clip times; mines bake spell tint and glow.
+- Shields: viewer sphere/disc shells and ShieldWall mesh with rim (alpha 0.35
+  for daylight). Rails with extra elements draw AdditionalRenderData billboards
+  only. Arcane area blasts draw ArcaneDisc rings (test
+  `arcane_area_cast_blasts_and_hurts_nearby_pawns`).
+- HUD: hud.xnb element icons for queue (bottom centre) and keys (bottom left),
+  compact status with spell names, full help on F8.
+
+Verified by offscreen screenshots (inspected) and tests: 3 unit + 16
+integration pass, loadout smoke passes. Local runs need the alsa-lib 1.2.16
+entry removed from LD_LIBRARY_PATH (glibc mismatch) and `--offscreen` (no xvfb).
+
+Still open: wave/rockpillar variant clip, ShieldEffect refraction shader,
+ice wall transparency, live check of weapon-cast shield wall, death/gib
+presentation of mirrored NPCs, magick catalog coverage, audio.
+
 ## Wrap-up: robe colour/coverage and missile presentation (2026-10-22)
 
 User requested wrapping up after a successful compilation and pushing the
