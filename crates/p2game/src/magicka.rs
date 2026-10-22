@@ -434,7 +434,11 @@ pub(crate) fn tick(
                 npc.character.combat.health.hit_points += (hp - mirror.health) * HEALTH_SCALE;
                 let body = &mut wizard.session.world.physics.bodies[npc.body];
                 body.move_to(p2magicka::to_magicka(pos), body.orientation);
-                body.velocity = [0.; 3];
+                // Postal walks its pawns; a body Magicka is pushing keeps its
+                // momentum so the push integrates over frames.
+                if !body.is_pushed() {
+                    body.velocity = [0.; 3];
+                }
             }
             mirror.health = hp;
         }
@@ -693,6 +697,23 @@ pub(crate) fn tick(
             );
         }
         let alive = vm.get_prop(actor, "Health").map(Value::as_float).unwrap_or(0.) > 0.;
+        // Magicka pushes (water spray, the elementless push, blasts) move the
+        // mirrored body even without damage. Only bodies Magicka marks as
+        // pushed count (its own AI walking does not): launch the Postal pawn
+        // with that velocity so its falling physics carries the knockback.
+        let pushed = npc.and_then(|n| {
+            let body = &wizard.session.world.physics.bodies[n.body];
+            body.is_pushed().then_some(Vec3::from(body.velocity))
+        });
+        if let Some(push) = pushed.filter(|p| alive && Vec2::new(p.x, p.z).length() > 1.5) {
+            let mut v = Vec3::from(p2magicka::to_postal(push.to_array()));
+            v.z = v.z.max(0.) + 120.;
+            vm.set_prop(actor, "Velocity", Value::Vector(v.to_array()));
+            vm.set_prop(actor, "Physics", Value::Byte(2));
+            if std::env::var_os("MAGICKA_TRACE").is_some() {
+                println!("MAGICKA KNOCKBACK {} {v:?}", vm.object_name(actor));
+            }
+        }
         if damage >= 1. {
             let amount = damage.floor() as i32;
             let elements = if spell_elements != 0 { spell_elements } else { status_elements(statuses) };

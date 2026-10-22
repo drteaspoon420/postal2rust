@@ -699,3 +699,24 @@ fn arcane_area_cast_blasts_and_hurts_nearby_pawns() {
     let hp = w.session.world.npcs.get(&handle).map_or(0., |n| n.character.combat.health.hit_points);
     assert!(blasts > 0 && hp < 1000., "arcane area: blasts={blasts} hp={hp} events={events:#?}");
 }
+#[test]
+#[ignore]
+fn print_water_push_on_hosted_pawn() {
+    for (name, queue, shift) in [("water", vec![0usize], false), ("push", vec![], true)] {
+        let mut w = world();
+        let handle = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+        frames(&mut w, PlayerInput::default(), 30);
+        for e in queue { element(&mut w, e); }
+        let input = PlayerInput { cast_down: true, shift_down: shift, ..Default::default() };
+        for i in 0..40 {
+            let body = w.session.world.npcs[&handle].body;
+            let before = w.session.world.physics.bodies[body].position;
+            w.input(if i < 30 { input } else { PlayerInput::default() }, [500., 0., FLOOR + 60.], DT);
+            w.step(DT).unwrap();
+            let after = w.session.world.physics.bodies[body].position;
+            let v = w.session.world.physics.bodies[body].velocity;
+            let d: Vec<f32> = (0..3).map(|k| (after[k] - before[k]) / DT).collect();
+            if i % 4 == 0 { println!("{name} {i} disp_speed {d:?} vel {v:?}"); }
+        }
+    }
+}
