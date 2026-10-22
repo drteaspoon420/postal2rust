@@ -329,7 +329,6 @@ pub(crate) fn tick(
     state.aim = aim;
     let orb = state.fp_orb.filter(|_| !state.classic);
     let aim_dir = (aim - orb.unwrap_or(Vec3::from(position))).normalize_or_zero();
-    wizard.place(position, aim_dir.to_array());
     let body_index = wizard.avatar().body;
     // Match capsule centres: both engines use centre positions, with their
     // respective radius/length determining the feet offset.
@@ -338,8 +337,18 @@ pub(crate) fn tick(
         .map(Value::as_float)
         .unwrap_or(40.);
     let mage_half = -wizard.body().height_offset() * p2magicka::UNREAL_UNITS_PER_METRE;
-    wizard.session.world.physics.bodies[body_index].position[1] +=
-        (mage_half - postal_half) / p2magicka::UNREAL_UNITS_PER_METRE;
+    let centre_offset = (mage_half - postal_half) / p2magicka::UNREAL_UNITS_PER_METRE;
+    let mut pawn_centre = p2magicka::to_magicka(position);
+    pawn_centre[1] += centre_offset;
+    // First person: Postal walks the pawn and the body follows it. Classic:
+    // Magicka's click movement owns the body (it must stay grounded to walk),
+    // and is only pulled back when Postal moved the pawn itself (scripts,
+    // teleports, travel).
+    let drift = Vec3::from(wizard.body().position).distance(Vec3::from(pawn_centre));
+    if !state.classic || drift > 1.5 {
+        wizard.place(position, aim_dir.to_array());
+        wizard.session.world.physics.bodies[body_index].position = pawn_centre;
+    }
     let body_before = wizard.body().position;
     // Native weapon selection and firing are suppressed while the wizard owns combat.
     vm.set_prop(pc, "bFire", Value::Int(0));
@@ -570,11 +579,14 @@ pub(crate) fn tick(
     }
     if std::env::var_os("MAGICKA_TRACE").is_some() {
         println!(
-            "MAGICKA TRACE native={native_health} published={:?} hp={} pos={:?} body={:?}",
+            "MAGICKA TRACE native={native_health} published={:?} hp={} pos={:?} body={:?} before={body_before:?} ground={} vel={:?} state={:?}",
             state.published_health,
             wizard.avatar().character.combat.health.hit_points,
             position,
-            wizard.body().position
+            wizard.body().position,
+            wizard.body().is_touching_ground(),
+            wizard.body().velocity,
+            wizard.avatar().motion.state,
         );
     }
     let health = (wizard.avatar().character.combat.health.hit_points / HEALTH_SCALE)
@@ -613,11 +625,18 @@ pub(crate) fn tick(
     };
     vm.set_prop(pawn, "GroundSpeed", Value::Float(speed));
     // Magicka teleport, push and levitation results are resolved by Postal's
-    // collision on the next movement frame.
+    // collision on the next movement frame. Classic walking moves the pawn
+    // with the body every frame.
     let delta = Vec3::from(p2magicka::to_postal(std::array::from_fn(|i| {
         wizard.body().position[i] - body_before[i]
     })));
-    if delta.length_squared() > 1. {
+    if state.classic {
+        let mut centre = wizard.body().position;
+        centre[1] -= centre_offset;
+        let target = Vec3::from(p2magicka::to_postal(centre));
+        vm.set_prop(pawn, "Location", Value::Vector(target.to_array()));
+        vm.set_prop(pawn, "Velocity", Value::Vector((delta / dt.max(1e-3)).to_array()));
+    } else if delta.length_squared() > 1. {
         vm.set_prop(
             pawn,
             "Location",
