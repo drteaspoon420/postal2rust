@@ -168,6 +168,8 @@ fn exec_hook(mut sim: NonSendMut<Sim>, mut frame: Local<u32>, mut last: Local<St
     // Pawns spawned by EXEC commands: position, state and physics every 10 frames.
     TRACKED.with(|t| {
         if f % 10 == 0 {
+            // A load or travel replaces the object table; drop stale ids.
+            t.borrow_mut().retain(|&a| a < vm.objects.len());
             for &a in t.borrow().iter() {
                 let c = vm.get_prop(a, "Controller").and_then(|c| c.as_obj());
                 println!("TRACK@{f} t={:.2} {} deleted {} at {:?} phys {:?} health {:?} ctrl {:?}", vm.level.and_then(|l| vm.get_prop(l, "TimeSeconds")).map(|t| t.as_float()).unwrap_or(0.0), vm.object_name(a), vm.objects[a].deleted, vm.actor_loc(a), vm.get_prop(a, "Physics"), vm.get_prop(a, "Health"), c.map(|c| vm.state_name(c)));

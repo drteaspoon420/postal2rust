@@ -68,6 +68,8 @@ pub struct GameHost {
     pub lib: Arc<Library>,
     pub map_name: RefCell<String>,
     pub anims: RefCell<HashMap<ObjId, ActorAnim>>,
+    /// Frame counter for the periodic attachment heal (`restore_bone_attachments`).
+    attach_heal: Cell<u32>,
     meshes: RefCell<HashMap<String, Option<Rc<MeshInfo>>>>,
     sets: RefCell<HashMap<String, Option<Arc<AnimSet>>>>,
     /// Channel of the notify being delivered (`GetNotifyChannel`).
@@ -327,6 +329,7 @@ impl GameHost {
             lib,
             map_name: RefCell::new(String::new()),
             anims: RefCell::new(HashMap::new()),
+            attach_heal: Cell::new(0),
             meshes: RefCell::new(HashMap::new()),
             sets: RefCell::new(HashMap::new()),
             notify_channel: Cell::new(0),
@@ -475,6 +478,15 @@ impl GameHost {
             return;
         }
         let t1 = std::time::Instant::now();
+        // Saves restore attachment properties only; heal unbound ones now and then.
+        let tick = self.attach_heal.get().wrapping_add(1);
+        self.attach_heal.set(tick);
+        if tick % 30 == 1 {
+            let n = self.restore_bone_attachments(vm);
+            if n > 0 {
+                println!("anim: {n} bone attachments rebound");
+            }
+        }
         self.update_attachments(vm);
         self.times.borrow_mut().anim += t1.elapsed().as_secs_f64();
     }
@@ -539,6 +551,38 @@ impl GameHost {
                 self.notify_channel.set(0);
             }
         }
+    }
+
+    /// A loaded save restores `Base`/`AttachmentBone` but not the native
+    /// AttachToBone bindings that live in the animation instances (and
+    /// post-load scripts may rebuild instances). Rebind any actor whose saved
+    /// attachment is missing from its base's instance: heads, hats, held items.
+    pub fn restore_bone_attachments(&self, vm: &mut Vm) -> usize {
+        let actors = vm.actors.clone();
+        let mut restored = 0;
+        for child in actors {
+            if vm.objects.get(child).is_none_or(|o| o.deleted) {
+                continue;
+            }
+            let bone = vm.get_prop(child, "AttachmentBone").map(|v| v.as_name()).unwrap_or_default();
+            if bone.is_empty() || bone.eq_ignore_ascii_case("None") {
+                continue;
+            }
+            let Some(base) = vm.get_prop(child, "Base").and_then(|v| v.as_obj()) else { continue };
+            if vm.objects.get(base).is_none_or(|o| o.deleted) {
+                continue;
+            }
+            let bound = self.anims.borrow().get(&base).is_some_and(|x| x.inst.attachments().any(|(id, _)| *id == child as u64));
+            if bound {
+                continue;
+            }
+            let rel_l = Vec3::from(vm.get_prop(child, "RelativeLocation").map(|v| v.as_vec()).unwrap_or_default());
+            let rel_r = vm.get_prop(child, "RelativeRotation").map(|v| v.as_rot()).unwrap_or_default();
+            if self.with_inst(vm, base, |i| i.attach_to_bone(child as u64, &bone, rel_l, rel_r)).unwrap_or(false) {
+                restored += 1;
+            }
+        }
+        restored
     }
 
     /// Places every bone-attached actor at its bone (world Location/Rotation).
