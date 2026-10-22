@@ -304,6 +304,9 @@ struct FxState {
     additional_material: Option<Handle<AdditiveMaterial>>,
     arcane_blasts: Option<(Entity, Handle<Mesh>)>,
     arcane_disc: Option<Option<Handle<Image>>>,
+    /// runesArcane / runesLife meshes and the runes00 texture (None: failed).
+    rune_assets: Option<Option<([Handle<Mesh>; 2], Handle<Image>)>>,
+    runes: Vec<(Entity, Handle<AdditiveMaterial>)>,
 }
 struct EffectModel {
     effect: p2magicka::visual::SkinnedEffect,
@@ -724,6 +727,7 @@ fn sync(
         &mut additive,
         &mut transforms,
     );
+    barrier_runes(&mut commands, (&mut fx.rune_assets, &mut fx.runes), wizard, world, &mut images, &mut meshes, &mut additive, &mut transforms);
     // Earth and ice walls and spell mines: the original skinned models with
     // their emerge clips at the simulation's clip times (viewer sync_barriers
     // and sync_mines placement).
@@ -1343,4 +1347,94 @@ fn arcane_blasts(
         ))
         .id();
     *draw = Some((entity, handle));
+}
+
+/// Solid Arcane/Life barriers' rune discs: runesArcane/runesLife tinted by
+/// the spell colour, spinning with the rune rotation below the wall (viewer
+/// `sync_barrier_runes`).
+#[allow(clippy::too_many_arguments)]
+fn barrier_runes(
+    commands: &mut Commands,
+    (assets, pool): (
+        &mut Option<Option<([Handle<Mesh>; 2], Handle<Image>)>>,
+        &mut Vec<(Entity, Handle<AdditiveMaterial>)>,
+    ),
+    wizard: &p2magicka::WizardWorld,
+    world: &p2magicka::magicka_runtime::scene_world::SceneWorld<
+        p2magicka::magicka_runtime::play_content::FsSceneContent,
+    >,
+    images: &mut Assets<Image>,
+    meshes: &mut Assets<Mesh>,
+    additive: &mut Assets<AdditiveMaterial>,
+    transforms: &mut Query<(&mut Transform, &mut Visibility)>,
+) {
+    use p2magicka::magicka_sim::barrier::Rune;
+    let draws: Vec<_> = world
+        .barriers
+        .slots
+        .iter()
+        .flatten()
+        .filter(|b| b.solid() && !b.dead)
+        .filter_map(|b| {
+            let (rune, color) = b.rune()?;
+            let (yaw, at) = b.rune_placement();
+            Some((rune, color, Transform::from_translation(Vec3::from(at)).with_rotation(Quat::from_rotation_y(yaw))))
+        })
+        .collect();
+    if draws.is_empty() && pool.is_empty() {
+        return;
+    }
+    let loaded = assets.get_or_insert_with(|| {
+        let content = &wizard.content;
+        let mesh = |name: &str| -> Result<Mesh, String> {
+            let parts = p2magicka::visual::model_parts(content, &format!("Models/Effects/{name}"))?;
+            let part = parts.into_iter().next().ok_or(format!("{name}: empty"))?;
+            let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part.geometry.positions);
+            if let Some(uv) = part.geometry.uvs {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+            }
+            mesh.insert_indices(Indices::U32(part.geometry.indices));
+            Ok(mesh)
+        };
+        let result = (|| {
+            let texture = p2magicka::visual::texture2d(content, "Models/Effects/runes00_0")?;
+            let image = images.add(Image::new(
+                Extent3d { width: texture.width, height: texture.height, depth_or_array_layers: 1 },
+                TextureDimension::D2,
+                texture.rgba,
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::default(),
+            ));
+            Ok::<_, String>(([meshes.add(mesh("runesArcane")?), meshes.add(mesh("runesLife")?)], image))
+        })();
+        result.map_err(|e| eprintln!("MAGICKA runes: {e}")).ok()
+    });
+    let Some((rune_meshes, image)) = loaded.as_ref() else { return };
+    for (i, (rune, color, transform)) in draws.iter().enumerate() {
+        let mesh = rune_meshes[if *rune == Rune::Arcane { 0 } else { 1 }].clone();
+        let tint = Vec4::new(color[0], color[1], color[2], 1.0);
+        if i == pool.len() {
+            let material = additive.add(AdditiveMaterial { color: tint, flags: UVec4::new(1, 0, 0, 0), texture: Some(image.clone()) });
+            let entity = commands
+                .spawn((Mesh3d(mesh), MeshMaterial3d(material.clone()), *transform, Visibility::Visible, NotShadowCaster, NoFrustumCulling))
+                .id();
+            pool.push((entity, material));
+            continue;
+        }
+        let (entity, material) = pool[i].clone();
+        if let Some(mut m) = additive.get_mut(&material) {
+            m.color = tint;
+        }
+        commands.entity(entity).insert(Mesh3d(mesh));
+        if let Ok((mut t, mut v)) = transforms.get_mut(entity) {
+            *t = *transform;
+            *v = Visibility::Visible;
+        }
+    }
+    for (entity, _) in pool.iter().skip(draws.len()) {
+        if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+            *v = Visibility::Hidden;
+        }
+    }
 }
