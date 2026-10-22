@@ -9,6 +9,7 @@ use uscript::vm::{ObjId, Value};
 mod creatures;
 mod hud;
 mod looks;
+mod sound;
 mod wardrobe;
 mod wheel;
 
@@ -82,6 +83,7 @@ pub(crate) struct MagicState {
     wheel: wheel::Wheel,
     /// F9 magick book position in `book_magicks()`.
     book: Option<usize>,
+    sounds: sound::Sounds,
 }
 impl MagicState {
     pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
@@ -641,6 +643,7 @@ pub(crate) fn tick(
             return;
         }
     }
+    state.sounds.update(&wizard.content, &wizard.session.audio, dt);
     // First person: Teleport lands where the crosshair points (Magicka's
     // 10 m reach), backed off walls and dropped onto the floor below.
     if teleport_to_aim {

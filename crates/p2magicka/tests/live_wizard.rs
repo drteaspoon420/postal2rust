@@ -781,3 +781,26 @@ fn cold_freezes_a_wet_hosted_pawn() {
     }
     assert!(seen & Status::Frozen as u16 != 0, "statuses seen {seen:#x}");
 }
+#[test]
+#[ignore]
+fn print_spell_audio_decoding() {
+    use p2magicka::magicka_runtime::audio::{AudioLibrary, banks};
+    let w = world();
+    let lib = AudioLibrary::load(&w.content);
+    println!("errors {:?}", lib.errors);
+    let mut r = 0.5f32;
+    let mut rnd = || { r = (r * 7.31 + 0.13).fract(); r };
+    let (mut ok, mut bad) = (0, 0);
+    for name in ["spell_fire_area", "spell_earth_force", "spell_ice_force", "spell_push_area", "magick_meteor_preblast", "spell_water_spray", "spell_fire_spray", "spell_lightning", "spell_arcane_beam"] {
+        let cue = p2magicka::magicka_runtime::scene_loading::custom_hash(name);
+        if !lib.has_cue(banks::SPELLS, cue) { println!("no cue {name}"); continue; }
+        let Some(voices) = lib.resolve(banks::SPELLS, cue, &mut rnd) else { continue };
+        for v in voices.iter().take(1) {
+            match lib.try_decode(&v.wave_bank, v.track) {
+                Ok(p) => { ok += 1; if ok < 3 { println!("ok {:?} {} {}Hz {}ch {} frames", lib.cue_name(banks::SPELLS, cue), v.wave_bank, p.sample_rate, p.channels, p.frames()); } }
+                Err(e) => { bad += 1; if bad < 4 { println!("bad {:?} {e}", lib.cue_name(banks::SPELLS, cue)); } }
+            }
+        }
+    }
+    println!("decoded ok={ok} bad={bad}");
+}
