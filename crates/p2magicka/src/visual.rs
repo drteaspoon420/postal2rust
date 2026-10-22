@@ -397,6 +397,77 @@ pub fn model_parts(content: &Path, name: &str) -> Result<Vec<Part>, String> {
     ))
 }
 
+/// An original animated effect model (barrier walls, mines): skinned mesh
+/// parts, their skeleton and the clip the simulation times.
+pub struct SkinnedEffect {
+    pub parts: Vec<Part>,
+    pub skeleton: skinned::Skeleton,
+    pub clip: Option<magicka_content::assets::AnimationClip>,
+}
+impl SkinnedEffect {
+    /// Vertex positions of every part with the clip sampled at `time`,
+    /// placed by the XNA row-vector `world` matrix.
+    pub fn pose(&self, time: f32, world: &Mat) -> Vec<Vec<[f32; 3]>> {
+        let skins = match &self.clip {
+            Some(clip) => skinned::skin_matrices(&self.skeleton, clip, time, world),
+            None => {
+                let bind = self.skeleton.bind_absolute();
+                self.skeleton
+                    .bones
+                    .iter()
+                    .zip(&bind)
+                    .map(|(b, a)| skinned::mul(&skinned::mul(&b.inverse_bind, a), world))
+                    .collect()
+            }
+        };
+        self.parts
+            .iter()
+            .map(|part| match (&part.geometry.joints, &part.geometry.weights) {
+                (Some(j), Some(w)) if !skins.is_empty() => part
+                    .geometry
+                    .positions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| skinned::skin_vertex(*p, j[i], w[i], &skins))
+                    .collect(),
+                _ => part.geometry.positions.iter().map(|p| transform_point(*p, world)).collect(),
+            })
+            .collect()
+    }
+}
+/// Load `Models/Effects/{mesh}` with the first clip of `clips` (another
+/// skinned file holding the animation), or of the mesh file itself.
+pub fn skinned_effect(
+    content: &Path,
+    mesh: &str,
+    clips: Option<&str>,
+    tint: [f32; 3],
+) -> Result<SkinnedEffect, String> {
+    let load = |name: &str| {
+        play_content::load_skinned_model(content, Path::new(&format!("Models/Effects/{name}.xnb")))
+            .map_err(|e| format!("{name}: {e:?}"))
+    };
+    let model = load(mesh)?;
+    let clip = match clips {
+        Some(name) => load(name)?.clips.into_iter().next(),
+        None => model.clips.first().cloned(),
+    };
+    let asset = format!("Models/Effects/{mesh}");
+    let parts = model
+        .model
+        .as_ref()
+        .map(|m| parts(content, &asset, m, &model.shared, None, tint))
+        .unwrap_or_default();
+    if parts.is_empty() {
+        return Err(format!("{mesh}: no renderable mesh"));
+    }
+    Ok(SkinnedEffect {
+        parts,
+        skeleton: model.skeleton,
+        clip,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

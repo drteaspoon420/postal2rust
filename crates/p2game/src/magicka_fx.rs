@@ -1,6 +1,7 @@
 //! Magicka spell presentation inside Postal's renderer: the original particle
 //! effects (sprays, impacts, statuses, chants), railgun beams and lightning
-//! bolts with materials ported from the rewrite viewer, plus simple shapes for
+//! bolts with materials ported from the rewrite viewer, original animated wall
+//! and mine models, simple shapes for
 //! shields, barriers and mines, and original missile models. Magicka world space (metres, Y up)
 //! is Postal's Bevy world space (`p2view::scene::to_bevy`), so positions pass
 //! through unchanged.
@@ -281,8 +282,6 @@ struct Shared {
     bolt_strips: Vec<[bolt_mesh::StripVertex; 34]>,
     sphere: Handle<Mesh>,
     cylinder: Handle<Mesh>,
-    rock: Handle<StandardMaterial>,
-    ice: Handle<StandardMaterial>,
 }
 
 #[derive(Default)]
@@ -293,10 +292,55 @@ struct FxState {
     bolts: Vec<(u32, Entity, Handle<AdditiveMaterial>)>,
     glows: Pool,
     glow_materials: Vec<Handle<AdditiveMaterial>>,
-    solids: Pool,
     missiles: Pool,
     missile_models:
         std::collections::HashMap<String, Vec<(Handle<Mesh>, Handle<StandardMaterial>)>>,
+    /// Original animated effect models (walls, mines); None after a load error.
+    /// Keyed by model and baked fabric tint.
+    effect_models: std::collections::HashMap<(&'static str, [u8; 3]), Option<EffectModel>>,
+    animated: Vec<Animated>,
+}
+struct EffectModel {
+    effect: p2magicka::visual::SkinnedEffect,
+    images: Vec<Option<Handle<Image>>>,
+}
+/// One drawn instance of an effect model: an entity, mesh and material per part.
+struct Animated {
+    key: (&'static str, [u8; 3]),
+    parts: Vec<(Entity, Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+/// A requested effect model instance this frame.
+struct EffectDraw {
+    mesh: &'static str,
+    clips: Option<&'static str>,
+    time: f32,
+    world: [f32; 16],
+    tint: [f32; 3],
+    emissive: f32,
+}
+/// Bevy emissive units for EmissiveAmount 1 under Postal's camera exposure.
+fn glow_scale() -> f32 {
+    std::env::var("MAGICKA_GLOW").ok().and_then(|v| v.parse().ok()).unwrap_or(2.5)
+}
+/// XNA row-vector world matrix: rows right, up, backward, translation.
+fn xna_world(position: Vec3, forward: Vec3, yaw: Option<f32>, scale: f32) -> [f32; 16] {
+    let (right, up, back) = match yaw {
+        Some(a) => (
+            Vec3::new(a.cos(), 0., -a.sin()),
+            Vec3::Y,
+            Vec3::new(a.sin(), 0., a.cos()),
+        ),
+        None => {
+            let back = -forward.normalize_or(Vec3::NEG_Z);
+            let right = Vec3::Y.cross(back).normalize_or(Vec3::X);
+            (right, back.cross(right), back)
+        }
+    };
+    let (r, u, b) = (right * scale, up * scale, back * scale);
+    [
+        r.x, r.y, r.z, 0., u.x, u.y, u.z, 0., b.x, b.y, b.z, 0., position.x, position.y,
+        position.z, 1.,
+    ]
 }
 
 fn volume_image(v: &p2magicka::visual::Volume) -> Image {
@@ -388,7 +432,6 @@ fn setup(
     images: &mut Assets<Image>,
     meshes: &mut Assets<Mesh>,
     particle_materials: &mut Assets<ParticleMaterial>,
-    standard: &mut Assets<StandardMaterial>,
 ) -> Result<Shared, String> {
     let sheets = p2magicka::visual::particle_sheets(content)?;
     let [a, b, c, d]: [Handle<Image>; 4] = sheets
@@ -428,18 +471,6 @@ fn setup(
         bolt_strips: (0..16).map(|_| bolt_mesh::strip(&mut rng)).collect(),
         sphere: meshes.add(Sphere::new(1.0).mesh().uv(32, 16)),
         cylinder: meshes.add(Cylinder::new(1.0, 1.0)),
-        rock: standard.add(StandardMaterial {
-            base_color: Color::srgb(0.45, 0.36, 0.27),
-            perceptual_roughness: 0.95,
-            ..default()
-        }),
-        ice: standard.add(StandardMaterial {
-            base_color: Color::srgba(0.7, 0.9, 1.0, 0.8),
-            emissive: LinearRgba::rgb(0.05, 0.12, 0.2),
-            alpha_mode: AlphaMode::Blend,
-            perceptual_roughness: 0.15,
-            ..default()
-        }),
     })
 }
 
@@ -497,7 +528,6 @@ fn sync(
             &mut images,
             &mut meshes,
             &mut particle_materials,
-            &mut standard,
         ) {
             Ok(shared) => fx.shared = Some(shared),
             Err(error) => {
@@ -516,12 +546,14 @@ fn sync(
 
     if std::env::var_os("MAGICKA_TRACE").is_some() {
         println!(
-            "MAGICKA FX particles={} beams={} bolts={} shields={} missiles={}",
+            "MAGICKA FX particles={} beams={} bolts={} shields={} missiles={} barriers={:?} mines={}",
             session.effects.particles.active().len(),
             session.beams.len(),
             session.bolts.len(),
             world.shields.len(),
-            world.missiles.len()
+            world.missiles.len(),
+            world.barriers.slots.iter().flatten().map(|b| (b.solid(), b.dead, b.position, b.earth_clip.time)).collect::<Vec<_>>(),
+            world.mines.slots.iter().flatten().count(),
         );
     }
     // Original particle effects: sprays, impacts, status emitters, chants.
@@ -683,44 +715,81 @@ fn sync(
             false,
         ));
     }
-    let mut solids: Vec<(Transform, bool)> = Vec::new();
+    // Earth and ice walls and spell mines: the original skinned models with
+    // their emerge clips at the simulation's clip times (viewer sync_barriers
+    // and sync_mines placement).
+    let mut effect_draws: Vec<EffectDraw> = Vec::new();
     for barrier in world.barriers.slots.iter().flatten() {
         if barrier.dead {
             continue;
         }
+        if barrier.solid() {
+            use p2magicka::magicka_sim::barrier::{EarthModel, IceModel};
+            let world_matrix = xna_world(
+                Vec3::from(barrier.position) - Vec3::Y * 1.3,
+                Vec3::from(barrier.direction),
+                None,
+                barrier.scale,
+            );
+            if let Some(model) = barrier.ice_model.filter(|_| barrier.draw_ice) {
+                let (mesh, clips) = match model {
+                    IceModel::Plain => ("iceBarrier0_mesh", Some("iceBarrier_animation")),
+                    IceModel::Geyser => ("icebarrier_geyser", None),
+                    IceModel::Tesla => ("icebarrier_tesla", None),
+                    IceModel::Earth => ("iceBarrier_earth", None),
+                };
+                effect_draws.push(EffectDraw {
+                    mesh,
+                    clips,
+                    time: barrier.ice_clip.time,
+                    world: world_matrix,
+                    tint: [1.; 3],
+                    emissive: 0.,
+                });
+            }
+            if let Some(model) = barrier.earth_model {
+                let (mesh, clips) = match model {
+                    EarthModel::Plain => ("earthBarrier0_mesh", Some("earthBarrier_animation")),
+                    EarthModel::Volcano => ("earthBarrier_volcano", None),
+                };
+                effect_draws.push(EffectDraw {
+                    mesh,
+                    clips,
+                    time: barrier.earth_clip.time,
+                    world: world_matrix,
+                    tint: [1.; 3],
+                    emissive: 0.,
+                });
+            }
+            continue;
+        }
         let p = Vec3::from(barrier.position);
         let r = barrier.radius.max(0.3) * barrier.scale.max(0.3);
-        let element = barrier.spell.element;
-        let earth = element.0 & Elements::EARTH.0 != 0;
-        let ice = element.0 & Elements::ICE.0 != 0 || barrier.draw_ice;
-        if earth || ice {
-            solids.push((
-                Transform::from_translation(p + Vec3::Y * r).with_scale(Vec3::new(
-                    r * 0.7,
-                    r * 2.0,
-                    r * 0.7,
-                )),
-                ice && !earth,
-            ));
-        }
-        if barrier.kind == p2magicka::magicka_sim::barrier::BarrierKind::Elemental || !earth {
-            glows.push((
-                Transform::from_translation(p + Vec3::Y * r).with_scale(Vec3::new(r, r * 2.0, r)),
-                element_color(element),
-                0.35,
-                true,
-            ));
-        }
-    }
-    for mine in world.mines.slots.iter().flatten() {
         glows.push((
-            Transform::from_translation(Vec3::from(mine.position) + Vec3::Y * 0.05).with_scale(
-                Vec3::new(0.4 * mine.scale.max(0.5), 1., 0.4 * mine.scale.max(0.5)),
-            ),
-            element_color(mine.spell.element),
-            if mine.activated { 0.9 } else { 0.5 },
+            Transform::from_translation(p + Vec3::Y * r).with_scale(Vec3::new(r, r * 2.0, r)),
+            element_color(barrier.spell.element),
+            0.35,
             true,
         ));
+    }
+    for mine in world.mines.slots.iter().flatten() {
+        if mine.dead {
+            continue;
+        }
+        effect_draws.push(EffectDraw {
+            mesh: "mine",
+            clips: None,
+            time: mine.clip_time,
+            world: xna_world(
+                Vec3::from(mine.position) - Vec3::Y * 0.1,
+                Vec3::NEG_Z,
+                Some(mine.model_yaw),
+                p2magicka::magicka_sim::spell_mine::MODEL_SCALE,
+            ),
+            tint: p2magicka::magicka_sim::lightning::spell_color(&mine.spell),
+            // SpellMine.RenderData.Draw: EmissiveAmount 2.
+            emissive: 2.,
+        });
     }
     let avatar = wizard.avatar();
     let ward = &avatar.character.combat.health.shield;
@@ -853,22 +922,118 @@ fn sync(
         }
     }
     finish(&mut fx.missiles, &mut transforms);
-    for (transform, ice) in solids {
-        let material = if ice {
-            shared.ice.clone()
-        } else {
-            shared.rock.clone()
+    let mut used = 0;
+    for draw in effect_draws {
+        // Spell colours are HDR; the skinned fabric tint (SkinnedModelDeferred
+        // TintColor) keeps their hue at unit peak.
+        let peak = draw.tint.iter().copied().fold(1f32, f32::max);
+        let tint = draw.tint.map(|c| c / peak);
+        let key = (draw.mesh, tint.map(|c| (c * 255.).round() as u8));
+        let loaded = fx.effect_models.entry(key).or_insert_with(|| {
+            match p2magicka::visual::skinned_effect(&wizard.content, draw.mesh, draw.clips, tint) {
+                Ok(mut effect) => {
+                    let images = effect
+                        .parts
+                        .iter_mut()
+                        .map(|part| {
+                            part.texture.take().map(|t| {
+                                images.add(Image::new(
+                                    Extent3d {
+                                        width: t.width,
+                                        height: t.height,
+                                        depth_or_array_layers: 1,
+                                    },
+                                    TextureDimension::D2,
+                                    t.rgba,
+                                    TextureFormat::Rgba8UnormSrgb,
+                                    RenderAssetUsages::default(),
+                                ))
+                            })
+                        })
+                        .collect();
+                    Some(EffectModel { effect, images })
+                }
+                Err(error) => {
+                    eprintln!("MAGICKA effect model: {error}");
+                    None
+                }
+            }
+        });
+        let Some(model) = loaded.as_ref() else {
+            continue;
         };
-        let mesh = shared.sphere.clone();
-        let index = place(
-            &mut commands,
-            &mut fx.solids,
-            &mut transforms,
-            transform,
-            |c| c.spawn(Mesh3d(mesh.clone())).id(),
-        );
-        let entity = fx.solids.entities[index];
-        commands.entity(entity).insert(MeshMaterial3d(material));
+        let posed = model.effect.pose(draw.time, &draw.world);
+        if used < fx.animated.len() && fx.animated[used].key != key {
+            for (entity, ..) in fx.animated.remove(used).parts {
+                commands.entity(entity).despawn();
+            }
+        }
+        if used == fx.animated.len() || fx.animated[used].key != key {
+            let parts = model
+                .effect
+                .parts
+                .iter()
+                .zip(&model.images)
+                .map(|(part, image)| {
+                    let mut mesh = Mesh::new(
+                        PrimitiveTopology::TriangleList,
+                        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+                    );
+                    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, part.geometry.positions.clone());
+                    if let Some(uv) = &part.geometry.uvs {
+                        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv.clone());
+                    }
+                    mesh.insert_indices(Indices::U32(part.geometry.indices.clone()));
+                    let mesh = meshes.add(mesh);
+                    let material = standard.add(StandardMaterial {
+                        base_color_texture: image.clone(),
+                        alpha_mode: if part.cutout {
+                            AlphaMode::Mask(0.5)
+                        } else {
+                            AlphaMode::Opaque
+                        },
+                        cull_mode: None,
+                        perceptual_roughness: 0.8,
+                        ..default()
+                    });
+                    let entity = commands
+                        .spawn((
+                            Mesh3d(mesh.clone()),
+                            MeshMaterial3d(material.clone()),
+                            Transform::IDENTITY,
+                            NoFrustumCulling,
+                        ))
+                        .id();
+                    (entity, mesh, material)
+                })
+                .collect();
+            fx.animated.insert(
+                used,
+                Animated {
+                    key,
+                    parts,
+                },
+            );
+        }
+        for ((entity, mesh, material), positions) in fx.animated[used].parts.iter().zip(posed) {
+            if let Ok((_, mut v)) = transforms.get_mut(*entity) {
+                *v = Visibility::Visible;
+            }
+            if let Some(mut mesh) = meshes.get_mut(mesh) {
+                mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+                mesh.compute_smooth_normals();
+            }
+            if let Some(mut m) = standard.get_mut(material) {
+                // EmissiveAmount scales the material's own colour.
+                m.emissive = LinearRgba::WHITE * draw.emissive * glow_scale();
+                m.emissive_texture = m.base_color_texture.clone();
+            }
+        }
+        used += 1;
     }
-    finish(&mut fx.solids, &mut transforms);
+    for animated in fx.animated.drain(used..) {
+        for (entity, ..) in animated.parts {
+            commands.entity(entity).despawn();
+        }
+    }
 }

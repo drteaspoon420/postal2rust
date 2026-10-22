@@ -1050,7 +1050,11 @@ fn postal_damage_class(
         "CuttingDamage"
     } else if has(E::LIGHTNING) {
         "ElectricalDamage"
-    } else if has(E::FIRE) || has(E::STEAM) {
+    } else if has(E::STEAM) {
+        // Steam scalds and soaks (Magicka's Wet status) rather than ignites;
+        // BurnedDamage would set the Postal victim alight.
+        "BludgeonDamage"
+    } else if has(E::FIRE) {
         "BurnedDamage"
     } else if has(E::POISON) {
         "AnthDamage"

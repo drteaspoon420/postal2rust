@@ -653,3 +653,32 @@ fn earth_and_ice_projectiles_hit_a_hosted_pawn() {
         assert!(hp < 1000., "projectile {queue:?} must damage the pawn in its path");
     }
 }
+#[test]
+#[ignore]
+fn print_effect_model_bounds() {
+    let w = world();
+    for name in ["earthBarrier0_mesh", "iceBarrier0_mesh", "earthBarrier_volcano", "iceBarrier_earth", "icebarrier_geyser", "icebarrier_tesla", "mine", "rockpillar0"] {
+        let clips = match name { "earthBarrier0_mesh" => Some("earthBarrier_animation"), "iceBarrier0_mesh" => Some("iceBarrier_animation"), _ => None };
+        match p2magicka::visual::skinned_effect(&w.content, name, clips, [1.; 3]) {
+            Ok(effect) => {
+                let id: [f32; 16] = [1.,0.,0.,0., 0.,1.,0.,0., 0.,0.,1.,0., 0.,0.,0.,1.];
+                for t in [0., 0.3, 10.] {
+                    let posed = effect.pose(t, &id);
+                    let ys = posed.iter().flatten().map(|v| v[1]);
+                    let (a, b) = ys.fold((f32::MAX, f32::MIN), |(a, b), y| (a.min(y), b.max(y)));
+                    println!("{name} t={t} clip={:?} y {a}..{b}", effect.clip.as_ref().map(|c| (&c.name, c.duration)));
+                }
+                let parts = effect.parts;
+                let mut lo = [f32::MAX; 3];
+                let mut hi = [f32::MIN; 3];
+                for p in &parts {
+                    for v in &p.geometry.positions {
+                        for i in 0..3 { lo[i] = lo[i].min(v[i]); hi[i] = hi[i].max(v[i]); }
+                    }
+                }
+                println!("{name}: {} parts tex={:?} lo={lo:?} hi={hi:?}", parts.len(), parts.iter().map(|p| p.texture.is_some()).collect::<Vec<_>>());
+            }
+            Err(e) => println!("{name}: ERR {e}"),
+        }
+    }
+}
