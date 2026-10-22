@@ -1,5 +1,28 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Session 2026-10-22 (d): magicks, NPC reactions, decals, sound
+
+- Magick survey (ignored test `print_magick_survey`): every player magick casts
+  and acts in the hosted sim. F9/Shift+F9 magick book cycles recipes into the
+  queue (Q/Space casts). Summoned Magicka NPCs (undead, slimes...) and the
+  summoned Death (actor frame bones + scythe) are drawn (magicka/creatures.rs).
+- First-person Teleport lands at the crosshair (10 m reach).
+- Postal reactions: knockdowns ragdoll mirrored pawns via Postal natives and
+  stand them up after 1.8 s; water/quench extinguishes Postal body fires
+  (ExtinguishDamage on MyBodyFire; not yet confirmed on screen because burning
+  NPCs flee); frozen pawns stop animating; status looks (frozen/cold/wet/
+  poisoned/shock) tint rig material copies (magicka/looks.rs). Magicka's vertex
+  bloat and x-ray skeleton are NOT ported (need a skinning-aware shader).
+- Depth prepass on the Postal camera with --magicka; Magicka projection decals
+  use the original shader (magicka_decals.wgsl). BakedLight got a prepass
+  fragment stage that applies the classic cutaway (else cut geometry left a
+  dark wedge). MAGICKA_NO_PREPASS=1 disables it.
+- Sound: session XACT cue requests play through Postal's AudioEngine
+  (magicka/sound.rs). Spells/misc banks decode natively; xWMA banks need ffmpeg
+  (not installed here). Music requests are ignored (Postal keeps its music).
+- First-person staff/weapon follow the third-person animation re-expressed from
+  the head to the view (MAGICKA_FP_HELD=1 restores the hand-made poses).
+
 ## Session 2026-10-22 (c): user playtest fixes
 
 - Classic movement: the body was teleported onto the pawn every frame and

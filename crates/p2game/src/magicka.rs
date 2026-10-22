@@ -1166,12 +1166,38 @@ fn visuals(
             (grip, x * scale, axis * scale, z * scale)
         }
     });
+    // First person shows the held items as the third-person animation moves
+    // them (casts, swings, charge), re-expressed from the character's head to
+    // the view: item_view = camera · head⁻¹ · item_world, nudged into frame.
+    let head = {
+        let body = wizard.body();
+        let f = Vec3::from(body.direction());
+        let flat = Vec3::new(f.x, 0., f.z).normalize_or(Vec3::NEG_Z);
+        let mut feet = Vec3::from(body.position);
+        feet.y += body.height_offset();
+        Mat4::from_rotation_translation(Quat::from_rotation_arc(Vec3::NEG_Z, flat), feet + Vec3::Y * 1.6)
+    };
+    let view = eye_and_forward.map(|(eye, forward)| {
+        Transform::from_translation(eye).looking_to(forward, Vec3::Y).to_matrix()
+            * Mat4::from_translation(Vec3::new(0., 0.15, -0.6))
+    });
+    let use_anim = std::env::var_os("MAGICKA_FP_HELD").is_none();
+    let animated = |slot: i32| -> Option<Mat4> {
+        let view = view.filter(|_| use_anim)?;
+        let item = items.iter().find(|(s, _)| *s == slot)?;
+        Some(view * head.inverse() * Mat4::from_cols_array(&item.1))
+    };
     // The staff orb sits at the top of the staff model along its held axis.
     state.fp_orb = held.as_ref().filter(|_| !state.classic).and_then(|held| {
         let staff = draws.parts.iter().find(|(p, ..)| p.slot == Some(1))?;
         let top = staff.0.geometry.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
-        let (origin, _, y, _) = held(1);
-        let tip = origin + y * top;
+        let tip = match animated(1) {
+            Some(m) => m.transform_point3(Vec3::new(0., top, 0.)),
+            None => {
+                let (origin, _, y, _) = held(1);
+                origin + y * top
+            }
+        };
         Some(Vec3::new(tip.x, tip.z, tip.y) * p2view::scene::UU_PER_M)
     });
     for (part, entity, handle) in &draws.parts {
@@ -1183,14 +1209,18 @@ fn visuals(
             };
         }
         let positions = match (state.classic, part.slot, &held) {
-            (false, Some(slot), Some(held)) => {
-                let (origin, x, y, z) = held(slot);
-                part.geometry
-                    .positions
-                    .iter()
-                    .map(|p| (origin + x * p[0] + y * p[1] + z * p[2]).to_array())
-                    .collect()
-            }
+            (false, Some(slot), Some(held)) => match animated(slot) {
+                // The third-person animation, seen from the wizard's eyes.
+                Some(m) => part.geometry.positions.iter().map(|p| m.transform_point3(Vec3::from(*p)).to_array()).collect(),
+                None => {
+                    let (origin, x, y, z) = held(slot);
+                    part.geometry
+                        .positions
+                        .iter()
+                        .map(|p| (origin + x * p[0] + y * p[1] + z * p[2]).to_array())
+                        .collect()
+                }
+            },
             _ => p2magicka::visual::positions(part, &skin, &items),
         };
         if let Some(mut mesh) = meshes.get_mut(handle) {
