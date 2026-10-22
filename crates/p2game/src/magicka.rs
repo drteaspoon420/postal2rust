@@ -603,12 +603,16 @@ pub(crate) fn tick(
             Some((m.handle, wizard.session.world.physics.bodies[npc.body].position))
         })
         .collect();
+    let mut teleport_to_aim = false;
     match wizard.step(dt) {
         Ok(events) => {
             for event in events {
                 if let AvatarEvent::CastMagick(magick) = &event {
                     state.notices = format!("Magick: {magick:?}");
                     println!("MAGICKA MAGICK {magick:?}");
+                    if !state.classic && *magick == p2magicka::magicka_sim::spells::MagickType::Teleport {
+                        teleport_to_aim = true;
+                    }
                 }
                 if let AvatarEvent::SpellCast {
                     spell, cast_type, ..
@@ -626,6 +630,24 @@ pub(crate) fn tick(
             state.error = Some(error);
             return;
         }
+    }
+    // First person: Teleport lands where the crosshair points (Magicka's
+    // 10 m reach), backed off walls and dropped onto the floor below.
+    if teleport_to_aim {
+        const REACH: f32 = 10. * p2magicka::UNREAL_UNITS_PER_METRE;
+        let ray = state.aim - eye;
+        let mut target = eye + ray.normalize_or_zero() * ray.length().min(REACH);
+        target -= ray.normalize_or_zero() * 40.;
+        if let Some(collision) = p2game::physics::level_collision() {
+            if let Some(hit) = collision.line(target, target - Vec3::Z * 3000.) {
+                target = hit.location + Vec3::Z * (postal_half + 2.);
+            }
+        }
+        let mut centre = p2magicka::to_magicka(target.to_array());
+        centre[1] += centre_offset;
+        let body = wizard.avatar().body;
+        wizard.session.world.physics.bodies[body].position = centre;
+        println!("MAGICKA TELEPORT to aim {target:?}");
     }
     if std::env::var_os("MAGICKA_TRACE").is_some() {
         println!(
