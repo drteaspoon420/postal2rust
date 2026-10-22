@@ -111,6 +111,8 @@ struct Mirror {
     burning: bool,
     frozen_speed: Option<f32>,
     gibbed: bool,
+    /// Seconds left of a Magicka knockdown shown as a Postal ragdoll.
+    ragdoll: Option<f32>,
 }
 #[derive(Component)]
 pub(crate) struct MagicHud;
@@ -420,6 +422,7 @@ pub(crate) fn tick(
                                 burning: false,
                                 frozen_speed: None,
                                 gibbed: false,
+                                ragdoll: None,
                             },
                         );
                     }
@@ -757,7 +760,50 @@ pub(crate) fn tick(
             let body = &wizard.session.world.physics.bodies[n.body];
             body.is_pushed().then_some(Vec3::from(body.velocity))
         });
-        if let Some(push) = pushed.filter(|p| alive && Vec2::new(p.x, p.z).length() > 1.5) {
+        // Magicka knockdowns (earth area, weapon blows) ragdoll the Postal
+        // pawn like Postal's own live ragdolls, then stand it back up.
+        let knocked = npc.is_some_and(|n| {
+            matches!(n.motion.state, p2magicka::magicka_runtime::character_motion::CharacterState::KnockDown)
+        });
+        if alive && knocked && mirror.ragdoll.is_none() {
+            let class = vm.objects[actor].class;
+            let _ = vm.call(class, Some(actor), "GetKarmaSkeleton", vec![]);
+            if vm.get_prop(actor, "KParams").and_then(Value::as_obj).is_some() {
+                let v = pushed.map(|p| Vec3::from(p2magicka::to_postal(p.to_array()))).unwrap_or(Vec3::ZERO) + Vec3::Z * 150.;
+                let _ = vm.call(class, Some(actor), "StopAnimating", vec![]);
+                vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(false));
+                let _ = vm.call(class, Some(actor), "SetPhysics", vec![Value::Byte(p2game::ragdoll::PHYS_KARMA_RAGDOLL)]);
+                let _ = vm.call(class, Some(actor), "KWake", vec![]);
+                let _ = vm.call(class, Some(actor), "KSetSkelVel", vec![Value::Vector(v.to_array())]);
+                mirror.ragdoll = Some(1.8);
+                if std::env::var_os("MAGICKA_TRACE").is_some() {
+                    println!("MAGICKA RAGDOLL {} {v:?}", vm.object_name(actor));
+                }
+            }
+        }
+        if let Some(left) = mirror.ragdoll.as_mut() {
+            *left -= dt;
+            if *left <= 0. {
+                mirror.ragdoll = None;
+                if vm.get_prop(actor, "Health").map(Value::as_float).unwrap_or(0.) > 0. {
+                    let class = vm.objects[actor].class;
+                    let mut rotation = vm.get_prop(actor, "Rotation").map(Value::as_rot).unwrap_or_default();
+                    rotation[0] = 0;
+                    rotation[2] = 0;
+                    vm.set_prop(actor, "Rotation", Value::Rotator(rotation));
+                    let mut at = vm.actor_loc(actor);
+                    at[2] += 50.;
+                    vm.set_prop(actor, "Location", Value::Vector(at));
+                    let _ = vm.call(class, Some(actor), "SetPhysics", vec![Value::Byte(2)]);
+                    vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(true));
+                    let _ = vm.call(class, Some(actor), "GiveBackRagdoll", vec![]);
+                    if std::env::var_os("MAGICKA_TRACE").is_some() {
+                        println!("MAGICKA GETUP {}", vm.object_name(actor));
+                    }
+                }
+            }
+        }
+        if let Some(push) = pushed.filter(|p| alive && mirror.ragdoll.is_none() && Vec2::new(p.x, p.z).length() > 1.5) {
             let mut v = Vec3::from(p2magicka::to_postal(push.to_array()));
             v.z = v.z.max(0.) + 120.;
             vm.set_prop(actor, "Velocity", Value::Vector(v.to_array()));
