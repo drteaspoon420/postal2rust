@@ -163,6 +163,26 @@ pub(super) fn draw(
             p2magicka::visual::positions(part, &skin, &[])
         });
     }
+    // Summon Elemental: eggs waiting for an element to hatch them.
+    if let Some(eggs) = world.elemental_eggs.as_ref() {
+        for slot in eggs.slots.iter().filter(|s| s.actor.registered) {
+            let Some(frame) = slot.frame.as_ref() else { continue };
+            let content = wizard.content.clone();
+            let model = c.models.entry("elemental_egg".into()).or_insert_with(|| {
+                load_model(
+                    p2magicka::visual::skinned_model_parts(&content, "Models/Characters/Elemental/elemental_mesh"),
+                    "elemental_egg",
+                    &mut images,
+                    &mut materials,
+                )
+            });
+            let Some(model) = model.as_ref() else { continue };
+            live.insert(slot.handle);
+            place(&mut commands, &mut c.drawn, &mut meshes, slot.handle, "elemental_egg", model, |part| {
+                p2magicka::visual::positions(part, &frame.bones, &[])
+            });
+        }
+    }
     // Summon Death: MagickDeath's own actor, its skinned body and the scythe.
     if let Some(frame) = world.death.frame.as_ref().filter(|_| world.death.actor.is_some()) {
         let content = wizard.content.clone();

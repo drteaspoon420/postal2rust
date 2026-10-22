@@ -804,3 +804,18 @@ fn print_spell_audio_decoding() {
     }
     println!("decoded ok={ok} bad={bad}");
 }
+#[test]
+#[ignore]
+fn print_elemental_summon() {
+    use p2magicka::magicka_sim::spells::{MAGICK_COMBOS, MagickType, Spell};
+    let mut w = world();
+    let elems = MAGICK_COMBOS.iter().find(|(m, _)| *m == MagickType::SElemental).unwrap().1;
+    w.avatar_mut().conjure.queue = elems.iter().map(|e| Spell::default_for(*e)).collect();
+    for i in 0..400 {
+        w.input(PlayerInput { boost_down: i < 2, ..Default::default() }, [500., 0., FLOOR + 60.], DT);
+        w.step(DT).unwrap();
+        if i % 60 == 0 {
+            println!("{i}: npcs={} eggs={} log={:?}", w.session.world.npcs.len(), w.session.world.elemental_eggs.is_some(), w.session.world.log.iter().rev().take(3).collect::<Vec<_>>());
+        }
+    }
+}
