@@ -790,21 +790,36 @@ pub(crate) fn tick(
             if has(S::Burning) && !mirror.burning {
                 mirror.burning = true;
                 vm.fire_event(actor, "SetOnFire", vec![Value::Object(Some(pawn)), Value::Bool(false)]);
-            } else if !has(S::Burning) && mirror.burning {
+            }
+            if std::env::var_os("MAGICKA_TRACE").is_some() && (mirror.burning || has(S::Wet)) {
+                println!("MAGICKA FIRE {} statuses={statuses:#x} body_fire={:?}", vm.object_name(actor), vm.get_prop(actor, "MyBodyFire"));
+            }
+            // Magicka ended the burn (water, cold, healing): end Postal's too.
+            let quenched = !has(S::Burning) && mirror.burning;
+            // Water puts out Postal's body fire (FireEmitter.TakeDamage fades on
+            // ExtinguishDamage), whether Magicka or Postal (gasoline, matches)
+            // lit it.
+            if has(S::Wet) || quenched {
                 mirror.burning = false;
-                if has(S::Wet) {
-                    let extinguish = vm.find_class("BaseFX", "ExtinguishDamage").ok();
-                    vm.fire_event(
-                        actor,
-                        "TakeDamage",
-                        vec![
-                            Value::Int(0),
-                            Value::Object(Some(pawn)),
-                            Value::Vector(vm.actor_loc(actor)),
-                            Value::Vector([0.; 3]),
-                            Value::Class(extinguish),
-                        ],
-                    );
+                if let Some(fire) = vm.get_prop(actor, "MyBodyFire").and_then(Value::as_obj) {
+                    if vm.objects.get(fire).is_some_and(|o| !o.deleted) {
+                        let extinguish = vm.find_class("BaseFX", "ExtinguishDamage").ok();
+                        vm.fire_event(
+                            fire,
+                            "TakeDamage",
+                            vec![
+                                Value::Int(1000),
+                                Value::Object(Some(pawn)),
+                                Value::Vector(vm.actor_loc(actor)),
+                                Value::Vector([0.; 3]),
+                                Value::Class(extinguish),
+                            ],
+                        );
+                        mirror.burning = false;
+                        if std::env::var_os("MAGICKA_TRACE").is_some() {
+                            println!("MAGICKA DOUSED {}", vm.object_name(actor));
+                        }
+                    }
                 }
             }
             // Frozen solid: no walking until the ice thaws or shatters.
