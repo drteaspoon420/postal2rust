@@ -32,7 +32,7 @@ fn shader(path: std::path::PathBuf) -> ShaderRef {
 
 /// Reverse-Z depth test without depth writes, as the original effects draw
 /// after the opaque scene.
-fn effect_depth(descriptor: &mut RenderPipelineDescriptor, blend: BlendComponent) {
+pub(crate) fn effect_depth(descriptor: &mut RenderPipelineDescriptor, blend: BlendComponent) {
     if let Some(fragment) = &mut descriptor.fragment {
         for target in fragment.targets.iter_mut().flatten() {
             target.blend = Some(BlendState {
@@ -311,7 +311,7 @@ fn depth_prepass(
         return;
     }
     for camera in &cameras {
-        commands.entity(camera).insert(bevy::core_pipeline::prepass::DepthPrepass);
+        commands.entity(camera).insert((bevy::core_pipeline::prepass::DepthPrepass, bevy::pbr::ScreenSpaceTransmission::default()));
     }
 }
 

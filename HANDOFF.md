@@ -1,5 +1,54 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## User-requested later feature
+
+Implement Postal 2 weapons as replacements for the Magicka/first-person
+character's **melee weapon slot**, in both camera modes. **Shift + Attack is
+alternate fire** for those weapons. This was explicitly requested as a note
+for later; do not describe it as already implemented or let it displace the
+current ethereal/invisibility, ally hostility, vortex, knockback and prop-damage
+fixes.
+
+## Session 2026-10-22 (f): character shaders, allies, props and release
+
+- New `magicka/appearance.rs` ports InvisibilityEffect's screen refraction and
+  AnimatedModelAdditive's cold-colour luminance/alpha pass. Avatar and summoned
+  NPC bodies use runtime invisible/ethereal flags. Invisible held items hide;
+  ending invisibility restores the original material. Death's body uses its
+  runtime additive/alpha state; its scythe stays ordinary opaque geometry.
+- Native neutral/friendly pawns now share the player's faction for summoned
+  and charmed AI; hostile disposition comes from `bPlayerIsEnemy` and native
+  controller Enemy/Attacker targets. Charmed native pawns temporarily become
+  friends, choose native hostiles and restore their original flags on expiry.
+- Vortex applies the original pull/core/mass rules to loose Postal physics
+  actors. Native Destroy consumes objects and feeds vortex mass. KWake must
+  precede setting Velocity: it otherwise republishes the old resting velocity.
+- Native cars/barrels/windows/destructibles have invisible PhysicsDamage box
+  proxies. Spells damage those proxies and the adapter sends deltas through
+  native TakeDamage; Postal decides damage filters, thresholds and explosions.
+  The boxes currently use native collision radius/height, not exact mesh bounds.
+- Native pawn sync now retains spell momentum and facing. Vortex/levitation
+  body velocities reach native physics, including vertical pulls. Spell launches
+  >=10 m/s start a live native ragdoll even without a KnockDown state, recovering
+  through the existing 1.8 s path. Vortex continues pulling active ragdolls.
+- First-person staff fades out in 35 ms during weapon attacks and returns over
+  100 ms. The staff orb/spell origin keeps updating while visually faded.
+- User was notified that the release build is ready, with direct launch command.
+
+Verification: release builds; bridge suite **3 unit + 22 content integration**
+passes (6 diagnostic tests ignored). **4 native host tests** pass: direct fire
+spell explodes a damaged actual FX.CarExplodable through its original script;
+vortex moves/consumes a native KActor and gains mass; native charm flags restore;
+strong knockback ragdolls a living pawn while a light push stays upright. The
+ragdoll fixture explicitly creates the native player's ragdoll pool.
+
+Inspected live invisibility/restored screenshots in `out/magicka/appearance/`;
+inspected ready/attack/recovered images in `out/magicka/release-check/`. The staff
+is absent during the attack and returns afterward. Release smoke exits 0.
+The `out/magicka/death-shader/` F9 smoke selected Conflagration, so those images
+do NOT establish the Death material; use the explicit SDeath recipe to check it.
+The full integration goal remains active.
+
 ## Session 2026-10-22 (e): stale pawn mirrors and reaction voices
 
 User reports ghost NPC duplicates at spawn points and requests that hurt/death

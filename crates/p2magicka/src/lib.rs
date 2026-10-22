@@ -292,6 +292,77 @@ impl WizardWorld {
         use magicka_runtime::entity_command::EntityCommandHost;
         self.session.world.terminate(handle).map_err(|e| format!("detach Postal pawn: {e:?}"))
     }
+    /// Follow a native pawn without cancelling a spell-driven impulse. Postal
+    /// owns ordinary movement; Magicka owns the remaining knockback velocity.
+    pub fn sync_pawn(&mut self, handle: u16, position: [f32; 3], facing: [f32; 3]) {
+        let Some(npc) = self.session.world.npcs.get(&handle) else { return };
+        let pulled = self.session.world.vortices.iter().any(|v| v.vortex.pull(self.session.world.physics.bodies[npc.body].position).is_some());
+        let body = &mut self.session.world.physics.bodies[npc.body];
+        body.set_position(to_magicka(position));
+        let f = [facing[0], facing[2], facing[1]];
+        body.orientation = Orientation::from_forward_up(f, [0., 1., 0.]);
+        body.set_desired_direction(f);
+        if !body.is_pushed() && !pulled && !body.owner.levitating { body.velocity = [0.; 3]; }
+    }
+    /// Native neutral/friendly people share the player's faction for summoned
+    /// and charmed AI targeting. Player damage still works across factions.
+    pub fn set_pawn_hostile(&mut self, handle: u16, hostile: bool) {
+        let faction = if hostile { 2 } else { self.avatar().faction };
+        if let Some(npc) = self.session.world.npcs.get_mut(&handle) {
+            npc.character.definition.faction = faction;
+            npc.faction_override = Some(faction);
+        }
+        if let Some(entity) = self.session.world.entities.iter_mut().find(|e| e.handle == handle) {
+            entity.faction = faction;
+            entity.original_faction = faction;
+        }
+    }
+    /// A damage/query proxy for a native destructible. Postal keeps its mesh,
+    /// rigid-body simulation and destruction scripts; the proxy is never drawn.
+    pub fn attach_prop(&mut self, position: [f32; 3], half_extents: [f32; 3], health: f32, mass: f32) -> Result<u16, String> {
+        use magicka_content::physics::{CollisionBox, PhysicsEntityTemplate};
+        use magicka_runtime::{physics_damage::PhysicsDamage, spawn_phys::SpawnPhysLevel};
+        let world = &mut self.session.world;
+        let handle = world.new_physics_entity().map_err(|e| format!("{e:?}"))?;
+        let t = PhysicsEntityTemplate {
+            movable: false, pushable: false, solid: true, mass,
+            max_hitpoints: health.ceil() as i32, can_have_status: true,
+            resistances: vec![], gibs: vec![], hit_effect: String::new(), hit_sound: String::new(),
+            gib_trail_effect: String::new(), model: None, collision_mesh: None,
+            boxes: vec![CollisionBox { name: "Postal".into(), position: [0.; 3],
+                sides: [half_extents[0]*2./UNREAL_UNITS_PER_METRE, half_extents[2]*2./UNREAL_UNITS_PER_METRE, half_extents[1]*2./UNREAL_UNITS_PER_METRE],
+                orientation: [0., 0., 0., 1.] }],
+            effects: vec![], conditions: Default::default(), id: String::new(), animated: None,
+        };
+        let mut state = PhysicsDamage::from_template(&t);
+        state.health = health;
+        state.maximum = health;
+        let radius = state.radius();
+        world.physics_damage.insert(handle, state);
+        let e = world.entities.iter_mut().find(|e| e.handle == handle).unwrap();
+        e.kind = magicka_runtime::scene_world::EntityKind::Physics { damageable: true };
+        e.position = to_magicka(position);
+        e.orientation = magicka_content::skinned::IDENTITY;
+        e.orientation[12..15].copy_from_slice(&e.position);
+        e.hit_points = health;
+        e.max_hit_points = health;
+        e.radius = radius;
+        e.added = true;
+        Ok(handle)
+    }
+    pub fn sync_prop(&mut self, handle: u16, position: [f32; 3], health: f32) {
+        if let Some(state) = self.session.world.physics_damage.get_mut(&handle) { state.health = health; }
+        if let Some(e) = self.session.world.entities.iter_mut().find(|e| e.handle == handle) {
+            e.position = to_magicka(position);
+            e.orientation[12..15].copy_from_slice(&e.position);
+            e.hit_points = health;
+            e.dead = health <= 0.;
+        }
+    }
+    pub fn detach_prop(&mut self, handle: u16) {
+        self.session.world.physics_damage.remove(&handle);
+        if let Some(e) = self.session.world.entities.iter_mut().find(|e| e.handle == handle) { e.removed = true; }
+    }
     /// Deliver host damage through the player's equipment, resistances,
     /// shields and status processing, exactly like another Magicka entity.
     pub fn receive_damage(

@@ -11,6 +11,20 @@ AI continue to run; the adapter must deliver combat through Postal pawn events.
 
 ## Implementation and verification in progress
 
+- Invisibility uses the original screen-normal refraction and hides held items;
+  ethereal bodies use the original luminance/ColdColor additive pass and runtime
+  alpha (Death's scythe remains opaque). Invisibility/restoration was inspected
+  live; Death's specific material still needs a valid live capture.
+- Summons/charmed NPCs use native Postal hostility flags and controller targets;
+  neutral pedestrians are not automatically enemies. Native charm flags restore
+  on expiry. Native and simulation target-selection regressions pass.
+- Spells now hit destructible prop proxies and deliver native TakeDamage. A fire
+  spell exploding an actual damaged CarExplodable passes a native host test.
+  Vortex moves and consumes loose native physics props using original force/core
+  rules. Prop proxies use collision-cylinder bounds rather than exact meshes.
+- Spell momentum survives native pawn synchronization. Launches >=10 m/s cause
+  a live ragdoll, with the existing recovery path. First-person staff fades out
+  in 35 ms during weapon attacks, returning over 100 ms afterward.
 - Deleted/hidden Postal pawns now lose their Magicka combat/AI/physics mirrors;
   moving a live pawn leaves no beam target at its spawn. Suburbs startup was
   leaving 123 stale targets before this cleanup. Exact visible NPC duplication
@@ -71,6 +85,11 @@ requires the sibling Magicka rewrite workspace to build.
 
 ## Still required before claiming completion
 
+- **User-requested later feature:** allow Postal 2 weapons to replace the
+  Magicka character's melee weapon slot in both first-person and classic views.
+  Attack fires the equipped Postal weapon; **Shift + Attack uses alternate
+  fire**. Preserve element casting alongside that slot. This is a future
+  equipment/control change, not implemented by the current fixes.
 - Continue live gameplay checks and fix runtime/adapter discrepancies.
 - Verify robe/equipment behavior in both camera modes, beyond model loading.
 - First-person presentation and muzzle placement; classic camera framing,

@@ -230,6 +230,75 @@ fn detached_hosted_pawn_leaves_no_combat_or_physics_ghost() {
     assert!(w.session.world.npcs[&replacement].character.combat.health.hit_points < 1000.);
     assert!(!w.session.world.physics.bodies[body].active);
 }
+
+#[test]
+fn native_pawn_sync_preserves_spell_momentum_and_facing() {
+    let mut w = world();
+    let handle = w.attach_pawn([250., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    frames(&mut w, PlayerInput::default(), 30);
+    let index = w.session.world.npcs[&handle].body;
+    w.session.world.physics.bodies[index].add_impulse_velocity([12., 4., 0.]);
+    w.step(DT).unwrap();
+    let velocity = w.session.world.physics.bodies[index].velocity;
+    assert!(velocity[0] > 8., "a strong blast must launch the body");
+    let at = p2magicka::to_postal(w.session.world.physics.bodies[index].position);
+    w.sync_pawn(handle, at, [0., 1., 0.]);
+    let body = &w.session.world.physics.bodies[index];
+    assert_eq!(body.velocity, velocity, "native position sync must not cancel knockback");
+    assert!((body.direction()[2] - 1.).abs() < 1e-5, "native yaw must reach the mirror");
+    w.step(DT).unwrap();
+    assert!(w.session.world.physics.bodies[index].velocity[0] > 7., "momentum must survive subsequent steps");
+}
+
+#[test]
+fn spells_hit_and_burn_native_prop_proxies() {
+    for element_index in [5, 7, 6] {
+        let mut w = world();
+        let handle = w.attach_prop([250., 0., FLOOR + 60.], [45., 35., 50.], 2000., 100.).unwrap();
+        element(&mut w, element_index);
+        frames(&mut w, PlayerInput { cast_down: true, ..Default::default() }, 45);
+        frames(&mut w, PlayerInput::default(), 90);
+        let state = &w.session.world.physics_damage[&handle];
+        assert!(state.health < 2000., "spell element {element_index} must hit a native prop: {}", state.health);
+        w.sync_prop(handle, [500., 100., FLOOR + 60.], 1234.);
+        assert_eq!(w.session.world.physics_damage[&handle].health, 1234.);
+        let entity = w.session.world.entities.iter().find(|e| e.handle == handle).unwrap();
+        assert_eq!(entity.position, p2magicka::to_magicka([500., 100., FLOOR + 60.]));
+        w.detach_prop(handle);
+        assert!(!w.session.world.physics_damage.contains_key(&handle));
+        assert!(w.session.world.entities.iter().find(|e| e.handle == handle).unwrap().removed);
+    }
+}
+
+#[test]
+fn summoned_and_charmed_allies_choose_hostile_postal_targets() {
+    use p2magicka::magicka_runtime::{spawn_action::SpawnOrder, npc::{ORDER_ATTACK, REACT_ATTACK, REACT_PROXIMITY}};
+    use p2magicka::magicka_sim::summons::SummonKind;
+    for charm in [false, true] {
+        let mut w = world();
+        let neutral = w.attach_pawn([160., 0., FLOOR + 60.], 5000., 24., 40.).unwrap();
+        let hostile = w.attach_pawn([280., 0., FLOOR + 60.], 5000., 24., 40.).unwrap();
+        w.set_pawn_hostile(neutral, false);
+        w.set_pawn_hostile(hostile, true);
+        let owner = w.avatar().handle;
+        let ally = w.session.world.summon_npc((!charm).then_some(owner), "Goblin_miner",
+            p2magicka::to_magicka([100., 160., FLOOR + 60.]), [1., 0., 0.], SummonKind::Normal,
+            SpawnOrder { order: ORDER_ATTACK, react_to: REACT_ATTACK | REACT_PROXIMITY, reaction: ORDER_ATTACK,
+                priority_target: 0, priority_ability: 0, trigger: 0, events: &[] }).unwrap();
+        if charm { assert!(w.session.world.charm_character(ally, owner, 20.)); }
+        let mut targeted = false;
+        for _ in 0..360 {
+            w.sync_pawn(neutral, [160., 0., FLOOR + 60.], [1., 0., 0.]);
+            w.sync_pawn(hostile, [280., 0., FLOOR + 60.], [1., 0., 0.]);
+            w.step(DT).unwrap();
+            if let Some(npc) = w.session.world.npcs.get(&ally) {
+                assert_ne!(npc.combat.current_target(), Some(neutral), "ally must not target a neutral pedestrian (charm={charm})");
+                targeted |= npc.combat.current_target() == Some(hostile);
+            }
+        }
+        assert!(targeted, "ally must acquire the Postal enemy (charm={charm})");
+    }
+}
 #[test]
 fn spells_produce_original_beam_and_particle_presentation() {
     let mut w = world();

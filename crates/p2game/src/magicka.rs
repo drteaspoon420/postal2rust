@@ -7,11 +7,17 @@ use p2magicka::persistence::SavedWizard;
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
 mod creatures;
+mod appearance;
+mod allegiance;
+mod vortex;
+mod props;
 mod hud;
 mod looks;
 mod sound;
 mod wardrobe;
 mod wheel;
+#[cfg(test)]
+mod host_tests;
 
 // Default Wizard has 1000 HP; Postal's default player has 100. This host
 // conversion keeps a gunshot's relative strength while retaining robe stats.
@@ -36,6 +42,7 @@ impl Plugin for MagickaPlugin {
             tick.after(crate::ui::ui_frame)
                 .before(crate::ui::follow_player),
         );
+        appearance::install(app);
     }
 }
 pub(crate) fn enabled() -> bool {
@@ -67,6 +74,7 @@ pub(crate) struct MagicState {
     death_delivered: bool,
     error: Option<String>,
     mirrors: HashMap<ObjId, Mirror>,
+    props: HashMap<ObjId, props::Prop>,
     pub(crate) classic: bool,
     pub aim: Vec3,
     /// Orb of the staff held in first person (Postal units), drawn last frame.
@@ -120,6 +128,26 @@ struct Mirror {
     /// the status looks on the Postal body (looks.rs).
     statuses: u16,
     shocked: f32,
+    charm: Option<allegiance::NativeDisposition>,
+}
+// Host presentation rule: a spell-driven launch at 10 m/s (525 uu/s) is
+// strong enough to tumble a living pawn, even without a KnockDown action.
+fn start_ragdoll(vm: &mut uscript::vm::Vm, actor: ObjId, pushed: Option<Vec3>, knocked: bool) -> bool {
+    if !knocked && !pushed.is_some_and(|v| v.length() >= 10.) { return false; }
+    let class = vm.objects[actor].class;
+    let _ = vm.call(class, Some(actor), "GetKarmaSkeleton", vec![]);
+    if vm.get_prop(actor, "KParams").and_then(Value::as_obj).is_none() { return false; }
+    let mut v = pushed.map(|p| Vec3::from(p2magicka::to_postal(p.to_array()))).unwrap_or(Vec3::ZERO);
+    if knocked { v.z += 150.; }
+    let _ = vm.call(class, Some(actor), "StopAnimating", vec![]);
+    vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(false));
+    let _ = vm.call(class, Some(actor), "SetPhysics", vec![Value::Byte(p2game::ragdoll::PHYS_KARMA_RAGDOLL)]);
+    let _ = vm.call(class, Some(actor), "KWake", vec![]);
+    let _ = vm.call(class, Some(actor), "KSetSkelVel", vec![Value::Vector(v.to_array())]);
+    if std::env::var_os("MAGICKA_TRACE").is_some() {
+        println!("MAGICKA RAGDOLL {} {v:?} knockdown={knocked} speed={:.2}", vm.object_name(actor), pushed.map_or(0., |v| v.length()));
+    }
+    true
 }
 #[derive(Component)]
 pub(crate) struct MagicHud;
@@ -207,6 +235,7 @@ pub(crate) fn tick(
         state.map = level_key;
         state.error = None;
         state.mirrors.clear();
+        state.props.clear();
         state.wardrobe.open = false;
         state.notices.clear();
         state.recent_elements = (0, 0.);
@@ -414,7 +443,11 @@ pub(crate) fn tick(
                 vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(true));
             }
         }
-        state.mirrors.remove(&actor);
+        if let Some(mut removed) = state.mirrors.remove(&actor) {
+            if vm.objects.get(actor).is_some_and(|o| !o.deleted) {
+                if let Some(saved) = removed.charm.take() { allegiance::restore(vm, actor, saved); }
+            }
+        }
         if std::env::var_os("MAGICKA_TRACE").is_some() {
             println!("MAGICKA DETACHED Postal pawn {actor}");
         }
@@ -456,6 +489,7 @@ pub(crate) fn tick(
                                 ragdoll: None,
                                 statuses: 0,
                                 shocked: 0.,
+                                charm: None,
                             },
                         );
                     }
@@ -494,17 +528,14 @@ pub(crate) fn tick(
             let mirror = &mut state.mirrors.get_mut(&actor).unwrap();
             if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
                 npc.character.combat.health.hit_points += (hp - mirror.health) * HEALTH_SCALE;
-                let body = &mut wizard.session.world.physics.bodies[npc.body];
-                body.move_to(p2magicka::to_magicka(pos), body.orientation);
-                // Postal walks its pawns; a body Magicka is pushing keeps its
-                // momentum so the push integrates over frames.
-                if !body.is_pushed() {
-                    body.velocity = [0.; 3];
-                }
             }
+            let yaw = vm.actor_rot(actor)[1] as f32 * std::f32::consts::TAU / 65536.;
+            wizard.sync_pawn(mirror.handle, pos, [yaw.cos(), yaw.sin(), 0.]);
             mirror.health = hp;
         }
     }
+    allegiance::sync(vm, pawn, &mut state.mirrors, wizard);
+    props::before(vm, wizard, &mut state.props);
     // The existing VM TakeDamage watch consumes the original hit before
     // Postal can kill the player; Magicka owns shields, robes and statuses.
     let incoming = p2game::damage_bridge::take(pawn);
@@ -668,6 +699,7 @@ pub(crate) fn tick(
         }
     }
     state.sounds.update(&wizard.content, &wizard.session.audio, dt);
+    vortex::props(vm, wizard);
     // First person: Teleport lands where the crosshair points (Magicka's
     // 10 m reach), backed off walls and dropped onto the floor below.
     if teleport_to_aim {
@@ -761,6 +793,7 @@ pub(crate) fn tick(
     } else {
         0
     };
+    props::after(vm, pawn, wizard, &mut state.props, spell_elements);
     // A soaked wizard (self-cast water, rain, wading) puts out Postal fire on
     // the player pawn too.
     if wizard.avatar().character.combat.statuses.current_mask & p2magicka::magicka_sim::status::Status::Wet as u16 != 0 {
@@ -852,30 +885,23 @@ pub(crate) fn tick(
         // mirrored body even without damage. Only bodies Magicka marks as
         // pushed count (its own AI walking does not): launch the Postal pawn
         // with that velocity so its falling physics carries the knockback.
+        let vortex_forced = npc.is_some_and(|n| wizard.session.world.vortices.iter().any(|v|
+            v.vortex.pull(wizard.session.world.physics.bodies[n.body].position).is_some()));
         let pushed = npc.and_then(|n| {
             let body = &wizard.session.world.physics.bodies[n.body];
-            body.is_pushed().then_some(Vec3::from(body.velocity))
+            (body.is_pushed() || vortex_forced || body.owner.levitating).then_some(Vec3::from(body.velocity))
         });
         // Magicka knockdowns (earth area, weapon blows) ragdoll the Postal
         // pawn like Postal's own live ragdolls, then stand it back up.
         let knocked = npc.is_some_and(|n| {
             matches!(n.motion.state, p2magicka::magicka_runtime::character_motion::CharacterState::KnockDown)
         });
-        if alive && knocked && mirror.ragdoll.is_none() {
+        if alive && mirror.ragdoll.is_none() && start_ragdoll(vm, actor, pushed, knocked) {
+            mirror.ragdoll = Some(1.8);
+        }
+        if vortex_forced && mirror.ragdoll.is_some() && let Some(push) = pushed {
             let class = vm.objects[actor].class;
-            let _ = vm.call(class, Some(actor), "GetKarmaSkeleton", vec![]);
-            if vm.get_prop(actor, "KParams").and_then(Value::as_obj).is_some() {
-                let v = pushed.map(|p| Vec3::from(p2magicka::to_postal(p.to_array()))).unwrap_or(Vec3::ZERO) + Vec3::Z * 150.;
-                let _ = vm.call(class, Some(actor), "StopAnimating", vec![]);
-                vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(false));
-                let _ = vm.call(class, Some(actor), "SetPhysics", vec![Value::Byte(p2game::ragdoll::PHYS_KARMA_RAGDOLL)]);
-                let _ = vm.call(class, Some(actor), "KWake", vec![]);
-                let _ = vm.call(class, Some(actor), "KSetSkelVel", vec![Value::Vector(v.to_array())]);
-                mirror.ragdoll = Some(1.8);
-                if std::env::var_os("MAGICKA_TRACE").is_some() {
-                    println!("MAGICKA RAGDOLL {} {v:?}", vm.object_name(actor));
-                }
-            }
+            let _ = vm.call(class, Some(actor), "KSetSkelVel", vec![Value::Vector(p2magicka::to_postal(push.to_array()))]);
         }
         if let Some(left) = mirror.ragdoll.as_mut() {
             *left -= dt;
@@ -899,9 +925,9 @@ pub(crate) fn tick(
                 }
             }
         }
-        if let Some(push) = pushed.filter(|p| alive && mirror.ragdoll.is_none() && Vec2::new(p.x, p.z).length() > 1.5) {
+        if let Some(push) = pushed.filter(|p| alive && mirror.ragdoll.is_none() && p.length() > 1.5) {
             let mut v = Vec3::from(p2magicka::to_postal(push.to_array()));
-            v.z = v.z.max(0.) + 120.;
+            if !vortex_forced { v.z = v.z.max(0.) + 120.; }
             vm.set_prop(actor, "Velocity", Value::Vector(v.to_array()));
             vm.set_prop(actor, "Physics", Value::Byte(2));
             if std::env::var_os("MAGICKA_TRACE").is_some() {
@@ -1078,6 +1104,7 @@ struct FirstPersonHands {
     state: Option<p2magicka::magicka_runtime::character_motion::CharacterState>,
     since: f32,
     walk: f32,
+    staff_fade: f32,
 }
 #[derive(Default)]
 struct WizardDraws {
@@ -1095,6 +1122,7 @@ fn visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    material_handles: Query<&MeshMaterial3d<StandardMaterial>>,
     mut visibility: Query<&mut Visibility>,
     time: Res<Time>,
     mut fp: Local<FirstPersonHands>,
@@ -1153,6 +1181,8 @@ fn visuals(
                     });
                     let entity = commands
                         .spawn((
+                            if part.slot.is_none() { appearance::CharacterPart::Body(wizard.avatar().handle) }
+                            else { appearance::CharacterPart::Item(wizard.avatar().handle) },
                             Mesh3d(mesh.clone()),
                             MeshMaterial3d(material),
                             Transform::IDENTITY,
@@ -1190,6 +1220,11 @@ fn visuals(
     }
     let t = time.elapsed_secs();
     let phase = t - fp.since;
+    // The off-hand animation follows the original wizard pose. Hide it very
+    // quickly during a weapon swing so it cannot sweep across the view.
+    let attacking = !state.classic && matches!(motion_state,
+        p2magicka::magicka_runtime::character_motion::CharacterState::Attack);
+    fp.staff_fade = (fp.staff_fade + time.delta_secs() * if attacking { 1. / 0.035 } else { -1. / 0.10 }).clamp(0., 1.);
     let walking = sim
         .game
         .player_controller
@@ -1285,6 +1320,15 @@ fn visuals(
         Some(Vec3::new(tip.x, tip.z, tip.y) * p2view::scene::UU_PER_M)
     });
     for (part, entity, handle) in &draws.parts {
+        if part.slot == Some(1) && let Ok(material) = material_handles.get(*entity) {
+            // Each player part has its own material; do not fade a shared
+            // staff asset used by another character.
+            if let Some(mut m) = materials.get_mut(&material.0) {
+                let alpha = if state.classic { 1. } else { 1. - fp.staff_fade };
+                m.base_color.set_alpha(alpha);
+                m.alpha_mode = if alpha < 0.999 { AlphaMode::Blend } else if part.cutout { AlphaMode::Mask(0.5) } else { AlphaMode::Opaque };
+            }
+        }
         if let Ok(mut v) = visibility.get_mut(*entity) {
             *v = if ui.player_view && (state.classic || part.slot.is_some()) {
                 Visibility::Visible

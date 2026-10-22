@@ -75,6 +75,7 @@ fn place(
     handle: u16,
     key: &str,
     model: &Model,
+    appearance: super::appearance::CharacterPart,
     positions: impl Fn(&p2magicka::visual::Part) -> Vec<[f32; 3]>,
 ) {
     if drawn.get(&handle).is_some_and(|(t, _)| t != key) {
@@ -100,6 +101,7 @@ fn place(
                 let mesh = meshes.add(mesh);
                 let entity = commands
                     .spawn((
+                        appearance,
                         Mesh3d(mesh.clone()),
                         MeshMaterial3d(material.clone()),
                         Transform::IDENTITY,
@@ -159,7 +161,7 @@ pub(super) fn draw(
         });
         let Some(model) = model.as_ref() else { continue };
         live.insert(e.handle);
-        place(&mut commands, &mut c.drawn, &mut meshes, e.handle, &template.to_ascii_lowercase(), model, |part| {
+        place(&mut commands, &mut c.drawn, &mut meshes, e.handle, &template.to_ascii_lowercase(), model, super::appearance::CharacterPart::Body(e.handle), |part| {
             p2magicka::visual::positions(part, &skin, &[])
         });
     }
@@ -178,7 +180,7 @@ pub(super) fn draw(
             });
             let Some(model) = model.as_ref() else { continue };
             live.insert(slot.handle);
-            place(&mut commands, &mut c.drawn, &mut meshes, slot.handle, "elemental_egg", model, |part| {
+            place(&mut commands, &mut c.drawn, &mut meshes, slot.handle, "elemental_egg", model, super::appearance::CharacterPart::Body(slot.handle), |part| {
                 p2magicka::visual::positions(part, &frame.bones, &[])
             });
         }
@@ -200,7 +202,8 @@ pub(super) fn draw(
             });
             let Some(model) = model.as_ref() else { continue };
             live.insert(handle);
-            place(&mut commands, &mut c.drawn, &mut meshes, handle, key, model, |part| {
+            let appearance = if handle == DEATH_BODY { super::appearance::CharacterPart::DeathBody } else { super::appearance::CharacterPart::DeathScythe };
+            place(&mut commands, &mut c.drawn, &mut meshes, handle, key, model, appearance, |part| {
                 if handle == DEATH_BODY {
                     p2magicka::visual::positions(part, &frame.bones, &[])
                 } else {
