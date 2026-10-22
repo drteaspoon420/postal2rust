@@ -759,3 +759,25 @@ fn print_magick_survey() {
             w.session.world.npcs.len() as i64 - npcs0 as i64);
     }
 }
+#[test]
+fn cold_freezes_a_wet_hosted_pawn() {
+    use p2magicka::magicka_sim::status::Status;
+    let mut w = world();
+    let handle = w.attach_pawn([180., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    frames(&mut w, PlayerInput::default(), 20);
+    let cast = PlayerInput { cast_down: true, ..Default::default() };
+    let mut seen = 0u16;
+    for e in [0usize, 3] {
+        element(&mut w, e);
+        for _ in 0..40 {
+            w.input(cast, [500., 0., FLOOR + 60.], DT);
+            w.step(DT).unwrap();
+            // The host pins mirrored bodies to their Postal pawns.
+            let body = w.session.world.npcs[&handle].body;
+            w.session.world.physics.bodies[body].position = p2magicka::to_magicka([180., 0., FLOOR + 60.]);
+            seen |= w.session.world.npcs[&handle].character.combat.statuses.current_mask;
+        }
+        frames(&mut w, PlayerInput::default(), 10);
+    }
+    assert!(seen & Status::Frozen as u16 != 0, "statuses seen {seen:#x}");
+}

@@ -8,6 +8,7 @@ use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
 mod creatures;
 mod hud;
+mod looks;
 mod wardrobe;
 mod wheel;
 
@@ -27,7 +28,7 @@ impl Plugin for MagickaPlugin {
         })
         .add_plugins(crate::magicka_fx::MagickaFxPlugin)
         .add_systems(Startup, (hud_setup, wardrobe::setup, persistence_pending))
-        .add_systems(Update, (wardrobe::draw, hud::icons, creatures::draw).after(tick))
+        .add_systems(Update, (wardrobe::draw, hud::icons, creatures::draw, looks::apply).after(tick))
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
             Update,
@@ -113,6 +114,10 @@ struct Mirror {
     gibbed: bool,
     /// Seconds left of a Magicka knockdown shown as a Postal ragdoll.
     ragdoll: Option<f32>,
+    /// Magicka statuses this frame and seconds left of a lightning shock, for
+    /// the status looks on the Postal body (looks.rs).
+    statuses: u16,
+    shocked: f32,
 }
 #[derive(Component)]
 pub(crate) struct MagicHud;
@@ -423,6 +428,8 @@ pub(crate) fn tick(
                                 frozen_speed: None,
                                 gibbed: false,
                                 ragdoll: None,
+                                statuses: 0,
+                                shocked: 0.,
                             },
                         );
                     }
@@ -752,6 +759,8 @@ pub(crate) fn tick(
             );
         }
         let alive = vm.get_prop(actor, "Health").map(Value::as_float).unwrap_or(0.) > 0.;
+        mirror.statuses = statuses;
+        mirror.shocked = (mirror.shocked - dt).max(0.);
         // Magicka pushes (water spray, the elementless push, blasts) move the
         // mirrored body even without damage. Only bodies Magicka marks as
         // pushed count (its own AI walking does not): launch the Postal pawn
@@ -838,6 +847,9 @@ pub(crate) fn tick(
                     class.map(|c| vm.classes[c].name.as_str()).unwrap_or("?")
                 );
             }
+            if class.is_some_and(|c| vm.classes[c].name == "ElectricalDamage") {
+                mirror.shocked = 0.45;
+            }
             mirror.remainder = damage - amount as f32;
         } else if damage <= -1. {
             vm.set_prop(actor, "Health", Value::Int(new_health as i32));
@@ -895,10 +907,18 @@ pub(crate) fn tick(
                 mirror.frozen_speed = vm.get_prop(actor, "GroundSpeed").map(Value::as_float);
                 vm.set_prop(actor, "GroundSpeed", Value::Float(0.));
                 vm.set_prop(actor, "Velocity", Value::Vector([0.; 3]));
+                // Frozen solid: the body stops mid-pose.
+                let class = vm.objects[actor].class;
+                let _ = vm.call(class, Some(actor), "StopAnimating", vec![]);
+                vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(false));
             } else if !has(S::Frozen) {
                 if let Some(speed) = mirror.frozen_speed.take() {
                     vm.set_prop(actor, "GroundSpeed", Value::Float(speed));
+                    vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(true));
                 }
+            }
+            if mirror.frozen_speed.is_some() {
+                vm.set_prop(actor, "Velocity", Value::Vector([0.; 3]));
             }
         }
         mirror.health = health_now;
