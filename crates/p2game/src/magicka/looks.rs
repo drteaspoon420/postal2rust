@@ -73,6 +73,9 @@ pub(super) struct Looks {
     /// Section entity -> (original material, tinted copy, look applied).
     applied: HashMap<Entity, (Handle<StandardMaterial>, Handle<StandardMaterial>, u8)>,
     clock: f32,
+    /// Frozen sections -> their bloated ice shell entity.
+    shells: HashMap<Entity, Entity>,
+    ice: Option<Handle<crate::magicka_fx::IceShellMaterial>>,
 }
 
 fn key(look: Look) -> u8 {
@@ -93,7 +96,9 @@ pub(super) fn apply(
     time: Res<Time>,
     rigs: Query<&VmRig>,
     sections: Query<&MeshMaterial3d<StandardMaterial>>,
+    section_meshes: Query<(&Mesh3d, Option<&bevy::mesh::skinning::SkinnedMesh>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut ice_materials: ResMut<Assets<crate::magicka_fx::IceShellMaterial>>,
     mut looks: Local<Looks>,
 ) {
     looks.clock += time.delta_secs();
@@ -116,12 +121,61 @@ pub(super) fn apply(
             }
         }
     }
+    // Frozen: a bloated translucent ice shell over each section.
+    let ice = looks
+        .ice
+        .get_or_insert_with(|| {
+            ice_materials.add(crate::magicka_fx::IceShellMaterial { params: Vec4::new(0.6, 0.85, 1.0, 0.035) })
+        })
+        .clone();
+    looks.shells.retain(|section, shell| {
+        let keep = wanted.get(section) == Some(&Look::Frozen) && section_meshes.contains(*section);
+        if !keep {
+            if let Ok(mut ec) = commands.get_entity(*shell) {
+                ec.despawn();
+            }
+            if std::env::var_os("MAGICKA_TRACE").is_some() {
+                println!("MAGICKA ICE removed {section:?}");
+            }
+        }
+        keep
+    });
+    for (&section, &look) in &wanted {
+        if look != Look::Frozen {
+            continue;
+        }
+        if looks.shells.contains_key(&section) {
+            continue;
+        }
+        let Ok((mesh, skinned)) = section_meshes.get(section) else { continue };
+        let mut shell = commands.spawn((
+            Mesh3d(mesh.0.clone()),
+            MeshMaterial3d(ice.clone()),
+            // Follow the section's transform and visibility, and disappear
+            // with it on map travel or rig replacement. Skinned sections use
+            // the original joints; rigid sections inherit their placement.
+            Transform::IDENTITY,
+            ChildOf(section),
+            bevy::camera::visibility::NoFrustumCulling,
+            bevy::light::NotShadowCaster,
+        ));
+        if let Some(skinned) = skinned {
+            shell.insert(skinned.clone());
+        }
+        let id = shell.id();
+        looks.shells.insert(section, id);
+        if std::env::var_os("MAGICKA_TRACE").is_some() {
+            println!("MAGICKA ICE attached {section:?}");
+        }
+    }
     // Restore sections whose look ended (or whose rig is gone).
     let ended: Vec<Entity> = looks.applied.keys().copied().filter(|e| !wanted.contains_key(e)).collect();
     for e in ended {
         let (original, tinted, _) = looks.applied.remove(&e).unwrap();
-        if let Ok(mut ec) = commands.get_entity(e) {
-            ec.insert(MeshMaterial3d(original));
+        // Postal can replace skins (for example a burned corpse) while a
+        // status is active. Never restore an obsolete skin over that change.
+        if sections.get(e).is_ok_and(|m| m.0 == tinted) {
+            commands.entity(e).insert(MeshMaterial3d(original));
         }
         materials.remove(&tinted);
     }
@@ -129,13 +183,20 @@ pub(super) fn apply(
         let k = key(l);
         match looks.applied.get_mut(&e) {
             Some((original, tinted, applied)) => {
-                if *applied != k {
+                let replaced = sections.get(e).is_ok_and(|m| m.0 != *tinted);
+                if replaced {
+                    *original = sections.get(e).unwrap().0.clone();
+                }
+                if *applied != k || replaced {
                     if let Some(base) = materials.get(original).cloned() {
-                        if let Some(mut m) = materials.get_mut(tinted) {
+                        if let Some(mut m) = materials.get_mut(&*tinted) {
                             *m = self::tinted(&base, l);
                         }
                     }
                     *applied = k;
+                    if replaced {
+                        commands.entity(e).insert(MeshMaterial3d(tinted.clone()));
+                    }
                 }
             }
             None => {

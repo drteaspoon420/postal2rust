@@ -396,9 +396,33 @@ pub(crate) fn tick(
     vm.set_prop(pc, "bFire", Value::Int(0));
     vm.set_prop(pc, "bAltFire", Value::Int(0));
     // Host live Postal characters in the rewrite's combat world.
+    // A script-hidden/deleted pawn must not leave an invisible Magicka target
+    // behind. Hidden map pawns can become visible later and get a fresh mirror.
+    let stale: Vec<_> = state.mirrors.keys().copied().filter(|&actor| {
+        vm.objects.get(actor).is_none_or(|o| o.deleted)
+            || vm.get_prop(actor, "bHidden").is_some_and(Value::as_bool)
+    }).collect();
+    for actor in stale {
+        let mirror = &state.mirrors[&actor];
+        if let Err(error) = wizard.detach_pawn(mirror.handle) {
+            eprintln!("MAGICKA pawn: {error}");
+            continue;
+        }
+        if vm.objects.get(actor).is_some_and(|o| !o.deleted) {
+            if let Some(speed) = mirror.frozen_speed {
+                vm.set_prop(actor, "GroundSpeed", Value::Float(speed));
+                vm.set_prop(actor, "bPhysicsAnimUpdate", Value::Bool(true));
+            }
+        }
+        state.mirrors.remove(&actor);
+        if std::env::var_os("MAGICKA_TRACE").is_some() {
+            println!("MAGICKA DETACHED Postal pawn {actor}");
+        }
+    }
     if let Ok(pawn_class) = vm.find_class_by_name("Pawn") {
         for actor in vm.live_actors() {
-            if actor == pawn || !vm.is_child_of(vm.objects[actor].class, pawn_class) {
+            if actor == pawn || !vm.is_child_of(vm.objects[actor].class, pawn_class)
+                || vm.get_prop(actor, "bHidden").is_some_and(Value::as_bool) {
                 continue;
             }
             let hp = vm
@@ -750,6 +774,25 @@ pub(crate) fn tick(
                     Value::Vector([0.; 3]),
                     Value::Class(extinguish),
                 ]);
+            }
+        }
+    }
+    // Debug: MAGICKA_DEBUG_FREEZE="a:b" holds Magicka's Frozen status on
+    // bystanders within 10 m from tick a to b (status looks, frozen AI).
+    if let Some((from, to)) = std::env::var("MAGICKA_DEBUG_FREEZE")
+        .ok()
+        .and_then(|v| v.split_once(':').and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?))))
+    {
+        thread_local!(static TICK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
+        let tick = TICK.with(|t| { t.set(t.get() + 1); t.get() });
+        if (from..to).contains(&tick) {
+            for (&actor, mirror) in &state.mirrors {
+                if Vec3::from(vm.actor_loc(actor)).distance(Vec3::from(position)) > 525. {
+                    continue;
+                }
+                if let Some(npc) = wizard.session.world.npcs.get_mut(&mirror.handle) {
+                    npc.character.combat.statuses.current_mask |= p2magicka::magicka_sim::status::Status::Frozen as u16;
+                }
             }
         }
     }

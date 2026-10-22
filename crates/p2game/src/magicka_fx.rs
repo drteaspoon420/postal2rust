@@ -276,6 +276,31 @@ impl Material for DecalMaterial {
     }
 }
 
+/// Frozen bodies: the skinned mesh bloated along its normals as translucent ice.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Debug)]
+pub(crate) struct IceShellMaterial {
+    /// rgb ice colour, w bloat in metres.
+    #[uniform(0)]
+    pub params: Vec4,
+}
+impl Material for IceShellMaterial {
+    fn vertex_shader() -> ShaderRef {
+        shader(embedded_path!("magicka_ice.wgsl"))
+    }
+    fn fragment_shader() -> ShaderRef {
+        shader(embedded_path!("magicka_ice.wgsl"))
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+    fn enable_prepass() -> bool {
+        false
+    }
+    fn enable_shadows() -> bool {
+        false
+    }
+}
+
 /// Magicka's projections read scene depth: give the Postal camera a depth
 /// prepass while the wizard is hosted (the camera is respawned per level).
 fn depth_prepass(
@@ -297,11 +322,13 @@ impl Plugin for MagickaFxPlugin {
         embedded_asset!(app, "magicka_beam.wgsl");
         embedded_asset!(app, "magicka_additive.wgsl");
         embedded_asset!(app, "magicka_decals.wgsl");
+        embedded_asset!(app, "magicka_ice.wgsl");
         app.add_plugins((
             MaterialPlugin::<ParticleMaterial>::default(),
             MaterialPlugin::<BeamMaterial>::default(),
             MaterialPlugin::<AdditiveMaterial>::default(),
             MaterialPlugin::<DecalMaterial>::default(),
+            MaterialPlugin::<IceShellMaterial>::default(),
         ))
         .add_systems(Update, depth_prepass)
         .add_systems(

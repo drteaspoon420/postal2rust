@@ -1,5 +1,55 @@
 # Agent handoff: Magicka wizard in Postal 2
 
+## Session 2026-10-22 (e): stale pawn mirrors and reaction voices
+
+User reports ghost NPC duplicates at spawn points and requests that hurt/death
+voices come from Postal rather than Magicka.
+
+- Found a concrete lifecycle bug: mirrored pawns were never detached when
+  Postal destroyed them. Suburbs startup removes many map pawns after the first
+  mirror pass, leaving invisible Magicka targets at their original positions.
+  The adapter now skips hidden pawns and detaches deleted/hidden ones through
+  `EntityCommandHost::terminate`, removing their NPC, AI agent, entity query
+  record and active physics body. A hidden frozen pawn gets its native speed
+  restored before losing its mirror. Trace mode logs detachments.
+- Live offscreen suburbs run logged **123 detachments** during startup. This
+  establishes the stale-target bug and cleanup; the user's exact *visual*
+  duplicate symptom has not been reproduced. An asynchronous question asking
+  whether these are Postal copies, robed figures or flat silhouettes remains
+  unanswered. Do not claim all visible duplication has been fixed.
+- Magicka character hurt/death/status voice cues are filtered before wave
+  resolution, for both Characters and Additional banks. Includes wizard hit,
+  die, onfire, sick and fall, other creatures' pain/death/drowning and expansion
+  variants. Spell, weapon, summon and attack cues stay enabled, including
+  Death's proximity effect. Native Postal damage/death voice paths are retained;
+  audible device playback has not been verified here.
+- Finished the pre-existing frozen shell work: skinning-aware vertex expansion,
+  translucent rim shader, shells parented to native sections for pose/visibility
+  and rig destruction. Thaw removes shells. Status tints now respect skin
+  replacements by Postal (e.g. burn skins) rather than restoring obsolete skins.
+  This is an approximate ice look, not Magicka's full cube-map shader parity.
+
+Verification:
+
+- Release build passes (`CCACHE_DISABLE=1 cargo build --locked --offline
+  --release -p p2game -j 2`).
+- Bridge suite passes: **3 unit + 19 content integration tests**, 6 intentional
+  diagnostics ignored. New tests verify a moved pawn leaves no beam target at
+  spawn but remains hittable at its new position, and detachment removes AI,
+  combat records and physics while a replacement pawn remains hittable.
+- Release binary voice-filter unit test passes (base and expansion reactions,
+  with spell/summon/Death effect preservation).
+- Inspected before/frozen/thawed screenshots in `out/magicka/ice/` and
+  thawed/final screenshots in `out/magicka/ghost-cleanup/`. Final live run exits
+  successfully with four screenshots, paired shell attach/remove logs and no
+  shader validation errors. `killall Bystanders` was accepted by the exec chain
+  but did **not** remove the summoned pawn; its final screenshot is not evidence
+  of pawn destruction. The startup detach logs and content test provide that
+  coverage. Logs are local; git diff whitespace check passes.
+
+The full wizard integration goal stays active; the broader gaps below still
+apply. No original content or sibling Magicka files were modified.
+
 ## Session 2026-10-22 (d): magicks, NPC reactions, decals, sound
 
 - Magick survey (ignored test `print_magick_survey`): every player magick casts

@@ -6,6 +6,24 @@ use p2sound::{PlayParams, SoundData, SoundSlot};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Postal owns pain/death voices, including the wizard's native player pawn.
+/// Keep attack, summon and spell cues (including Death's proximity effect).
+fn postal_character_voice(bank: u16, name: &str) -> bool {
+    use p2magicka::magicka_runtime::audio::banks;
+    if !matches!(bank, banks::CHARACTERS | banks::ADDITIONAL) {
+        return false;
+    }
+    let name = name.to_ascii_lowercase();
+    name.strip_prefix("chr_wizard_")
+        .is_some_and(|action| matches!(action, "hit" | "die" | "sick" | "fall" | "onfire"))
+        || name.rsplit('_').next().is_some_and(|action| {
+            action.starts_with("pain") || action.starts_with("drown")
+                || matches!(action, "hurt" | "die" | "death" | "drilldeath" | "onfire")
+        })
+        || ["_death_land", "_death_small", "_death_medium", "_death_big", "_hurt_long", "_hurt_short"]
+            .iter().any(|ending| name.ends_with(ending))
+}
+
 /// Synthetic engine actor ids for cues that follow an emitter (Move).
 const ACTOR_BASE: u64 = 0x4D41_0000_0000;
 
@@ -107,6 +125,9 @@ impl Sounds {
         for (request, position) in requests {
             match request {
                 AudioRequest::Start { key, bank, cue, volume_db, source, magnitude } => {
+                    if library.cue_name(*bank, *cue).is_some_and(|name| postal_character_voice(*bank, name)) {
+                        continue;
+                    }
                     let mut rng = self.rng;
                     let mut random = || {
                         rng ^= rng << 13;
@@ -177,5 +198,31 @@ impl Sounds {
                 !ids.is_empty()
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::postal_character_voice;
+    use p2magicka::magicka_runtime::audio::banks;
+
+    #[test]
+    fn postal_owns_hurt_and_death_but_magicka_keeps_spell_sounds() {
+        for cue in ["chr_wizard_hit", "chr_wizard_die", "chr_wizard_onfire", "chr_wizard_sick",
+            "chr_wizard_fall", "chr_goblin_pain", "chr_ghoul_death", "chr_skeleton_painlaugh",
+            "chr_generic_drown02", "chr_treespirit_death_land", "boss_death_death"] {
+            assert!(postal_character_voice(banks::CHARACTERS, cue), "{cue}");
+        }
+        for cue in ["chr_wizard_summon_element", "chr_skeleton_attack", "chr_darksoul_missile_fire_hit",
+            "boss_death_proximity", "boss_fafnir_deathray", "chr_skeleton_revive"] {
+            assert!(!postal_character_voice(banks::CHARACTERS, cue), "{cue}");
+        }
+        assert!(!postal_character_voice(banks::SPELLS, "spell_earth_hit"));
+        assert!(!postal_character_voice(banks::MISC, "misc_death"));
+        for cue in ["chr_cultist_pain", "deep_one_hurt_long", "elfmage_death", "chr_rat_die",
+            "dungeon_slime_cube_death_big", "dungeons_gargoyle_stone_hurt"] {
+            assert!(postal_character_voice(banks::ADDITIONAL, cue), "{cue}");
+        }
+        assert!(!postal_character_voice(banks::ADDITIONAL, "chr_cultist_cast"));
     }
 }

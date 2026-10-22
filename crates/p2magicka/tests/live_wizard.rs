@@ -177,6 +177,59 @@ fn hosted_pawn_keeps_its_postal_health() {
         1250.
     );
 }
+
+#[test]
+fn moved_hosted_pawn_leaves_no_beam_target_at_its_spawn() {
+    let mut w = world();
+    let handle = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    frames(&mut w, PlayerInput::default(), 30);
+    let body = w.session.world.npcs[&handle].body;
+    let moved = p2magicka::to_magicka([200., 400., FLOOR + 60.]);
+    element(&mut w, 5);
+    let before = w.session.world.npcs[&handle].character.combat.health.hit_points;
+    for _ in 0..120 {
+        let body = &mut w.session.world.physics.bodies[body];
+        body.move_to(moved, body.orientation);
+        w.set_staff_orb([0., 0., FLOOR + 60.], [1., 0., 0.]);
+        w.input(PlayerInput { cast_down: true, ..Default::default() }, [500., 0., FLOOR + 60.], DT);
+        w.step(DT).unwrap();
+    }
+    assert_eq!(w.session.world.npcs[&handle].character.combat.health.hit_points, before,
+        "a beam through the spawn point must not hit the moved pawn");
+    // Move it into the beam farther along, proving it is still a live target.
+    frames(&mut w, PlayerInput::default(), 30);
+    element(&mut w, 5);
+    let moved = p2magicka::to_magicka([400., 0., FLOOR + 60.]);
+    for _ in 0..120 {
+        let body = &mut w.session.world.physics.bodies[body];
+        body.move_to(moved, body.orientation);
+        w.set_staff_orb([0., 0., FLOOR + 60.], [1., 0., 0.]);
+        w.input(PlayerInput { cast_down: true, ..Default::default() }, [500., 0., FLOOR + 60.], DT);
+        w.step(DT).unwrap();
+    }
+    assert!(w.session.world.npcs[&handle].character.combat.health.hit_points < before,
+        "the moved pawn must receive damage at its current location");
+}
+
+#[test]
+fn detached_hosted_pawn_leaves_no_combat_or_physics_ghost() {
+    let mut w = world();
+    let handle = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    frames(&mut w, PlayerInput::default(), 30);
+    let body = w.session.world.npcs[&handle].body;
+    assert!(w.session.world.physics.bodies[body].active);
+    w.detach_pawn(handle).unwrap();
+    assert!(!w.session.world.npcs.contains_key(&handle));
+    assert!(!w.session.world.agents.contains(&handle));
+    assert!(!w.session.world.physics.bodies[body].active);
+    assert!(w.session.world.entities.iter().find(|e| e.handle == handle).unwrap().removed);
+    // The former spawn point is clear, while a new pawn there can be hit.
+    let replacement = w.attach_pawn([200., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+    element(&mut w, 5);
+    frames(&mut w, PlayerInput { cast_down: true, ..Default::default() }, 120);
+    assert!(w.session.world.npcs[&replacement].character.combat.health.hit_points < 1000.);
+    assert!(!w.session.world.physics.bodies[body].active);
+}
 #[test]
 fn spells_produce_original_beam_and_particle_presentation() {
     let mut w = world();

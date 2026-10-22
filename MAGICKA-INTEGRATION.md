@@ -11,6 +11,15 @@ AI continue to run; the adapter must deliver combat through Postal pawn events.
 
 ## Implementation and verification in progress
 
+- Deleted/hidden Postal pawns now lose their Magicka combat/AI/physics mirrors;
+  moving a live pawn leaves no beam target at its spawn. Suburbs startup was
+  leaving 123 stale targets before this cleanup. Exact visible NPC duplication
+  reported by the user still needs reproduction.
+- Character pain/death/status voices from Magicka's base and expansion banks
+  are suppressed. Spell, weapon, attack and summon effects retain their cues.
+- Frozen native bodies have skinned translucent ice shells that follow their
+  rig/visibility and disappear on thaw. This approximates the original look;
+  the full ice cube-map and electrocution skeleton effects remain incomplete.
 - Direct runtime host: real robe templates, equipment, animation and cast logic.
 - Collision conversion from Postal BSP, meshes and terrain to Magicka surfaces.
 - Mirrored Postal combat characters and damage delivery back to native scripts.

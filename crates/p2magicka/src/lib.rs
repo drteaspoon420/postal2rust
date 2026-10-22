@@ -286,6 +286,12 @@ impl WizardWorld {
         }
         Ok(handle)
     }
+    /// Remove a host pawn that was destroyed or hidden by Postal. The native
+    /// termination path removes its AI, combat target and active physics body.
+    pub fn detach_pawn(&mut self, handle: u16) -> Result<(), String> {
+        use magicka_runtime::entity_command::EntityCommandHost;
+        self.session.world.terminate(handle).map_err(|e| format!("detach Postal pawn: {e:?}"))
+    }
     /// Deliver host damage through the player's equipment, resistances,
     /// shields and status processing, exactly like another Magicka entity.
     pub fn receive_damage(
