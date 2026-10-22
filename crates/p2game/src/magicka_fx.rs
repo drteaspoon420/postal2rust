@@ -565,6 +565,9 @@ fn sync(
             session.arcane_blasts.len(),
             session.beam_blasts.len(),
         );
+        for m in world.missiles.iter().take(3) {
+            println!("MAGICKA MISSILE pos={:?} vel={:?} model={:?}", m.body.position, m.body.velocity, m.body.model);
+        }
     }
     // Original particle effects: sprays, impacts, status emitters, chants.
     if let Some(mut mesh) = meshes.get_mut(&shared.particles) {

@@ -245,29 +245,7 @@ fn parts(
 
 pub fn load(wizard: &WizardWorld) -> Result<Vec<Part>, String> {
     let content = &wizard.content;
-    let template = play_content::load_character(content, &wizard.loadout.robe)
-        .map_err(|e| format!("{e:?}"))?;
-    let mut out = Vec::new();
-    let character_asset = format!("Data/Characters/{}", wizard.loadout.robe);
-    for entry in &template.models {
-        let Some(reference) = &entry.model else {
-            continue;
-        };
-        let asset = mesh::resolve_reference(&character_asset, reference);
-        let model =
-            play_content::load_skinned_model(content, &Path::new(&asset).with_extension("xnb"))
-                .map_err(|e| format!("{e:?}"))?;
-        if let Some(geometry) = model.model.as_ref() {
-            out.extend(parts(
-                content,
-                &asset,
-                geometry,
-                &model.shared,
-                None,
-                std::array::from_fn(|i| entry.tint[i] * wizard.robe_colour[i]),
-            ));
-        }
-    }
+    let mut out = character_parts(content, &wizard.loadout.robe, wizard.robe_colour)?;
     for (slot, item) in &wizard.avatar().items {
         if item.definition.hide_model {
             continue;
@@ -297,6 +275,58 @@ pub fn load(wizard: &WizardWorld) -> Result<Vec<Part>, String> {
         return Err("robe has no renderable mesh".into());
     }
     Ok(out)
+}
+
+/// A character template's skinned body parts (robe, creature), with the
+/// template tints multiplied by `colour`.
+pub fn character_parts(content: &Path, template_name: &str, colour: [f32; 3]) -> Result<Vec<Part>, String> {
+    let template = play_content::load_character(content, template_name)
+        .map_err(|e| format!("{e:?}"))?;
+    let mut out = Vec::new();
+    let character_asset = format!("Data/Characters/{template_name}");
+    for entry in &template.models {
+        let Some(reference) = &entry.model else {
+            continue;
+        };
+        let asset = mesh::resolve_reference(&character_asset, reference);
+        let model =
+            play_content::load_skinned_model(content, &Path::new(&asset).with_extension("xnb"))
+                .map_err(|e| format!("{e:?}"))?;
+        if let Some(geometry) = model.model.as_ref() {
+            out.extend(parts(
+                content,
+                &asset,
+                geometry,
+                &model.shared,
+                None,
+                std::array::from_fn(|i| entry.tint[i] * colour[i]),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// A standalone skinned model's parts (e.g. `Models/Bosses/death/death`).
+pub fn skinned_model_parts(content: &Path, asset: &str) -> Result<Vec<Part>, String> {
+    let model = play_content::load_skinned_model(content, &Path::new(asset).with_extension("xnb"))
+        .map_err(|e| format!("{asset}: {e:?}"))?;
+    let geometry = model.model.as_ref().ok_or(format!("{asset}: no model"))?;
+    Ok(parts(content, asset, geometry, &model.shared, None, [1.; 3]))
+}
+
+/// Skinning matrices of a Magicka NPC's current pose (world metres).
+pub fn npc_pose(wizard: &WizardWorld, handle: u16) -> Option<Vec<Mat>> {
+    let world = &wizard.session.world;
+    let npc = world.npcs.get(&handle)?;
+    let rig = npc.rig.as_ref()?;
+    let body = &world.physics.bodies[npc.body];
+    let parent = magicka_runtime::character_pose::character_orientation(
+        &npc.character.scaled_static_transform(&rig.static_transform),
+        &body.orientation,
+        body.position,
+        body.height_offset(),
+    );
+    Some(rig.skeleton.skinned_for(&npc.motion.controller, &parent))
 }
 
 /// Sample the exact animation controller used for cast/melee timing. Matrices

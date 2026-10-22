@@ -6,6 +6,7 @@ use p2magicka::{Loadout, PlayerInput, WizardWorld, magicka_runtime::avatar::Avat
 use p2magicka::persistence::SavedWizard;
 use std::{collections::HashMap, path::PathBuf};
 use uscript::vm::{ObjId, Value};
+mod creatures;
 mod hud;
 mod wardrobe;
 mod wheel;
@@ -26,7 +27,7 @@ impl Plugin for MagickaPlugin {
         })
         .add_plugins(crate::magicka_fx::MagickaFxPlugin)
         .add_systems(Startup, (hud_setup, wardrobe::setup, persistence_pending))
-        .add_systems(Update, (wardrobe::draw, hud::icons).after(tick))
+        .add_systems(Update, (wardrobe::draw, hud::icons, creatures::draw).after(tick))
         .add_systems(Update, visuals.after(tick).before(crate::ui::follow_player))
         .add_systems(
             Update,
@@ -78,6 +79,8 @@ pub(crate) struct MagicState {
     /// F8: full control help in the status panel.
     help: bool,
     wheel: wheel::Wheel,
+    /// F9 magick book position in `book_magicks()`.
+    book: Option<usize>,
 }
 impl MagicState {
     pub(crate) fn loadout_open(&self) -> bool { self.wardrobe.open }
@@ -294,6 +297,29 @@ pub(crate) fn tick(
     let Some(wizard) = state.world.as_mut() else {
         return;
     };
+    // F9 / Shift+F9: the magick book puts the next/previous magick's elements
+    // in the queue (Q or Space casts it), like reading Magicka's tome.
+    if keys.just_pressed(KeyCode::F9) && !state.wardrobe.open {
+        let book = book_magicks();
+        let back = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        let i = match state.book {
+            None => if back { book.len() - 1 } else { 0 },
+            Some(i) if back => (i + book.len() - 1) % book.len(),
+            Some(i) => (i + 1) % book.len(),
+        };
+        state.book = Some(i);
+        let (magick, elements) = book[i];
+        wizard.avatar_mut().conjure.queue =
+            elements.iter().map(|e| p2magicka::magicka_sim::spells::Spell::default_for(*e)).collect();
+        state.notices = format!(
+            "Magick book {}/{}: {:?} = {} ({} casts, F9 next)",
+            i + 1,
+            book.len(),
+            magick,
+            elements.iter().map(|e| spell_name(&p2magicka::magicka_sim::spells::Spell::default_for(*e))).collect::<Vec<_>>().join(" "),
+            if state.classic { "Space" } else { "Q" },
+        );
+    }
     let vm = &mut sim.game.world.vm;
     p2game::damage_bridge::register(pawn);
     let position = vm.actor_loc(pawn);
@@ -580,6 +606,10 @@ pub(crate) fn tick(
     match wizard.step(dt) {
         Ok(events) => {
             for event in events {
+                if let AvatarEvent::CastMagick(magick) = &event {
+                    state.notices = format!("Magick: {magick:?}");
+                    println!("MAGICKA MAGICK {magick:?}");
+                }
                 if let AvatarEvent::SpellCast {
                     spell, cast_type, ..
                 } = event
@@ -804,7 +834,7 @@ pub(crate) fn tick(
         .collect::<Vec<_>>()
         .join(" / ");
     let controls = if !state.help {
-        "F8 controls | F7 loadout | F6 camera"
+        "F8 controls | F9 magick book | F7 loadout | F6 camera"
     } else if state.classic {
         "Q W E R / A S D F: Water Life Shield Cold / Lightning Arcane Earth Fire\nLMB move | Shift+LMB melee | RMB cast | Shift+RMB area | MMB self / staff | Space magick\nF6 camera | F7 loadout | F8 hide help"
     } else {
@@ -1062,6 +1092,22 @@ fn visuals(
             mesh.compute_smooth_normals();
         }
     }
+}
+
+/// The player-castable magicks (the original 34 and the Magicka DLC set),
+/// with their element recipes.
+fn book_magicks() -> Vec<(
+    p2magicka::magicka_sim::spells::MagickType,
+    &'static [p2magicka::magicka_sim::spells::Elements],
+)> {
+    use p2magicka::magicka_sim::spells::{MAGICK_COMBOS, MagickType as M};
+    MAGICK_COMBOS
+        .iter()
+        .filter(|(m, _)| {
+            (*m as u8) < 35 || matches!(m, M::Grow | M::Shrink | M::Etherealize | M::Polymorph | M::Earthquake)
+        })
+        .map(|(m, e)| (*m, *e))
+        .collect()
 }
 
 /// "Arcane + Fire", or the magick's name.

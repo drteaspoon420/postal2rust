@@ -720,3 +720,42 @@ fn print_water_push_on_hosted_pawn() {
         }
     }
 }
+#[test]
+#[ignore]
+fn print_magick_survey() {
+    use p2magicka::magicka_sim::spells::{MAGICK_COMBOS, Spell};
+    for (magick, elems) in MAGICK_COMBOS {
+        let mut w = world();
+        let handle = w.attach_pawn([250., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+        frames(&mut w, PlayerInput::default(), 20);
+        let npcs0 = w.session.world.npcs.len();
+        let pawn_body = w.session.world.npcs[&handle].body;
+        let p0 = w.session.world.physics.bodies[pawn_body].position;
+        let me0 = w.body().position;
+        w.avatar_mut().conjure.queue = elems.iter().map(|e| Spell::default_for(*e)).collect();
+        let mut cast = false;
+        let mut notes = std::collections::BTreeSet::new();
+        let (mut particles, mut missiles, mut bolts) = (0, 0, 0);
+        let mut statuses = 0u16;
+        for i in 0..240 {
+            let input = PlayerInput { boost_down: i < 2, ..Default::default() };
+            w.input(input, [500., 0., FLOOR + 60.], DT);
+            for e in w.step(DT).unwrap() {
+                let s = format!("{e:?}");
+                if s.starts_with("CastMagick") { cast = true; }
+                if s.starts_with("SpellNotReconstructed") { notes.insert(s.chars().take(80).collect::<String>()); }
+            }
+            particles = particles.max(w.session.effects.particles.active().len());
+            missiles = missiles.max(w.session.world.missiles.len());
+            bolts = bolts.max(w.session.bolts.len());
+            if let Some(n) = w.session.world.npcs.get(&handle) { statuses |= n.character.combat.statuses.current_mask; }
+        }
+        let hp = w.session.world.npcs.get(&handle).map_or(-1., |n| n.character.combat.health.hit_points);
+        let p1 = w.session.world.npcs.get(&handle).map(|n| w.session.world.physics.bodies[n.body].position).unwrap_or(p0);
+        let moved = ((p1[0]-p0[0]).powi(2) + (p1[2]-p0[2]).powi(2)).sqrt();
+        let me1 = w.body().position;
+        let me_moved = ((me1[0]-me0[0]).powi(2) + (me1[2]-me0[2]).powi(2)).sqrt();
+        println!("MAGICK {magick:?}: cast={cast} hp={hp:.0} pawn_moved={moved:.1} me_moved={me_moved:.1} npcs+={} statuses={statuses:#x} particles={particles} missiles={missiles} bolts={bolts} {notes:?}",
+            w.session.world.npcs.len() as i64 - npcs0 as i64);
+    }
+}
