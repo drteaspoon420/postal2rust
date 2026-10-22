@@ -618,3 +618,38 @@ fn print_item_bounds() {
         );
     }
 }
+#[test]
+fn earth_force_cast_launches_a_missile() {
+    let mut w = world();
+    element(&mut w, 6); // earth
+    let cast = PlayerInput {
+        cast_down: true,
+        ..Default::default()
+    };
+    frames(&mut w, cast, 30);
+    let mut seen = 0;
+    let mut events = Vec::new();
+    for _ in 0..60 {
+        w.input(PlayerInput::default(), [500., 0., FLOOR + 60.], DT);
+        events.extend(w.step(DT).unwrap().into_iter().map(|e| format!("{e:?}").chars().take(90).collect::<String>()));
+        seen = seen.max(w.session.world.missiles.len());
+    }
+    assert!(seen > 0, "an earth force cast must launch a missile; events: {events:#?}");
+}
+#[test]
+fn earth_and_ice_projectiles_hit_a_hosted_pawn() {
+    // Water + Cold makes Ice: shards instead of a rock.
+    for queue in [&[6usize][..], &[0, 3]] {
+        let mut w = world();
+        let handle = w.attach_pawn([250., 0., FLOOR + 60.], 1000., 24., 40.).unwrap();
+        frames(&mut w, PlayerInput::default(), 30);
+        for &e in queue {
+            element(&mut w, e);
+        }
+        let cast = PlayerInput { cast_down: true, ..Default::default() };
+        frames(&mut w, cast, 40);
+        frames(&mut w, PlayerInput::default(), 90);
+        let hp = w.session.world.npcs.get(&handle).map_or(0., |n| n.character.combat.health.hit_points);
+        assert!(hp < 1000., "projectile {queue:?} must damage the pawn in its path");
+    }
+}
