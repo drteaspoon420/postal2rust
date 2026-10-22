@@ -197,6 +197,29 @@ impl WizardWorld {
         body.move_to(to_magicka(postal_position), orientation);
         body.set_desired_direction(f);
     }
+    /// Host-presented staff orb (Postal position and facing). Casts read the
+    /// orb before the step re-poses the rig, so this replaces the third-person
+    /// orb for the spells launched in the next step.
+    pub fn set_staff_orb(&mut self, postal_position: [f32; 3], postal_forward: [f32; 3]) {
+        let f = [postal_forward[0], postal_forward[2], postal_forward[1]];
+        let length = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+        if length < 1e-4 {
+            return;
+        }
+        let f = f.map(|v| v / length);
+        let cross = |a: [f32; 3], b: [f32; 3]| {
+            [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+        };
+        let mut right = cross(f, [0., 1., 0.]);
+        let r = (right[0] * right[0] + right[1] * right[1] + right[2] * right[2]).sqrt();
+        right = if r < 1e-4 { [1., 0., 0.] } else { right.map(|v| v / r) };
+        let up = cross(right, f);
+        let p = to_magicka(postal_position);
+        self.avatar_mut().staff_orb = [
+            right[0], right[1], right[2], 0., up[0], up[1], up[2], 0., -f[0], -f[1], -f[2], 0.,
+            p[0], p[1], p[2], 1.,
+        ];
+    }
     pub fn input(&mut self, input: PlayerInput, aim: [f32; 3], dt: f32) {
         let world = &mut self.session.world;
         let magicks_allowed = world.unlocked_magick_mask;

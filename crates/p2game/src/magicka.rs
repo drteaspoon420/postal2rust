@@ -64,6 +64,9 @@ pub(crate) struct MagicState {
     mirrors: HashMap<ObjId, Mirror>,
     pub(crate) classic: bool,
     pub aim: Vec3,
+    /// Orb of the staff held in first person (Postal units), drawn last frame.
+    /// Spells leave from here, as the original reads the previous frame's orb.
+    fp_orb: Option<Vec3>,
     pub notices: String,
     /// Elements of the wizard's latest spell and when it was last active, so
     /// Postal hears which kind of damage a victim took.
@@ -318,7 +321,8 @@ pub(crate) fn tick(
         }
     }
     state.aim = aim;
-    let aim_dir = (aim - Vec3::from(position)).normalize_or_zero();
+    let orb = state.fp_orb.filter(|_| !state.classic);
+    let aim_dir = (aim - orb.unwrap_or(Vec3::from(position))).normalize_or_zero();
     wizard.place(position, aim_dir.to_array());
     let body_index = wizard.avatar().body;
     // Match capsule centres: both engines use centre positions, with their
@@ -523,6 +527,10 @@ pub(crate) fn tick(
         };
     }
     wizard.input(input, aim.to_array(), dt);
+    if let Some(orb) = orb {
+        // Casts, sprays and beams leave the staff seen in view, toward the crosshair.
+        wizard.set_staff_orb(orb.to_array(), aim_dir.to_array());
+    }
     state.clock += dt;
     if let Some((_, spell)) = wizard.avatar().casting_spell() {
         state.recent_elements = (spell.element.0, state.clock);
@@ -813,7 +821,7 @@ struct WizardDraws {
 }
 fn visuals(
     mut commands: Commands,
-    state: NonSend<MagicState>,
+    mut state: NonSendMut<MagicState>,
     sim: NonSend<Sim>,
     ui: Res<UiInput>,
     mut draws: Local<WizardDraws>,
@@ -824,6 +832,7 @@ fn visuals(
     time: Res<Time>,
     mut fp: Local<FirstPersonHands>,
 ) {
+    let state = &mut *state;
     let Some(wizard) = &state.world else { return };
     let loadout = wizard.equipped_loadout();
     if draws.map != state.map || draws.loadout.as_ref() != Some(&loadout) || draws.colour != wizard.robe_colour {
@@ -973,6 +982,14 @@ fn visuals(
             let x = axis.cross(z);
             (grip, x * scale, axis * scale, z * scale)
         }
+    });
+    // The staff orb sits at the top of the staff model along its held axis.
+    state.fp_orb = held.as_ref().filter(|_| !state.classic).and_then(|held| {
+        let staff = draws.parts.iter().find(|(p, ..)| p.slot == Some(1))?;
+        let top = staff.0.geometry.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max);
+        let (origin, _, y, _) = held(1);
+        let tip = origin + y * top;
+        Some(Vec3::new(tip.x, tip.z, tip.y) * p2view::scene::UU_PER_M)
     });
     for (part, entity, handle) in &draws.parts {
         if let Ok(mut v) = visibility.get_mut(*entity) {
